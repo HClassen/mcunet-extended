@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mcunet"
+version = "0.0.1"
+requires-python = ">= 3.12"
+authors = [{ name = "Henrik Claßen", email = "henrik.classen@web.de" }]
+readme = "README.md"
+dependencies = [
+    "torch",
+    "torchvision",
+    "flatbuffers",
+    "matplotlib",
+    "pyqt6",
+    "numpy == 1.26.4",
+    "pandas"
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["mcunet*"]

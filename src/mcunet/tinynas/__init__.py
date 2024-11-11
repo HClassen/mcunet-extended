@@ -1,79 +1,122 @@
-from typing import Final
-from collections.abc import Iterator
+from typing import Any
+from itertools import islice
+from collections.abc import Callable, Iterator
 
-import numpy as np
-
-from .mnasnet import sample_model, Model
-
-
-__all__ = [
-    "WIDTH_CHOICES", "RESOLUTION_CHOICES",
-    "configurations",
-    "SearchSpace", "SampleManager"
-]
+from .searchspace import Model, SearchSpace
 
 
-# The selected choices for the width multiplier.
-_width_step = 0.1
-WIDTH_CHOICES: Final[list[float]] = [0.2 + i * _width_step for i in range(9)]
-
-# The selected choices for the resolution.
-_resolution_step = 16
-RESOLUTION_CHOICES: Final[list[int]] = [
-    48 + i * _resolution_step for i in range(12)
-]
+__all__ = ["SampleManager"]
 
 
-def configurations() -> Iterator[tuple[float, int]]:
+class SampleManager():
     """
-    Creates all 108 combinations of alpha (width multiplier) and rho (resolution)
-    as per the MCUNet paper.
-
-    Returns:
-        Iterator[tuple[float, int]]:
-            An iterator of all combinations.
+    Handle sampling models from different search spaces and extracting different
+    statistics from them.
     """
-    for with_mult in WIDTH_CHOICES:
-        for resolution in RESOLUTION_CHOICES:
-            yield (with_mult, resolution)
+    _spaces: list[SearchSpace]
+    _models: list[list[Model]] | None
 
+    def __init__(self, spaces: list[SearchSpace]) -> None:
+        self._spaces = spaces
+        self._models = None
 
-class SearchSpace():
-    """
-    Represents a search space with a given width multiplier and resolution. It
-    implements the ``Iterator`` pattern to randomly sample models.
-    """
-    width_mult: float
-    resolution: int
-
-    _rng: np.random.Generator | None
-
-    def __init__(self, width_mult: float, resolution: int) -> None:
-        self.width_mult = width_mult
-        self.resolution = resolution
-
-        self._rng = None
-
-    def oneshot(self) -> Model:
+    def sample(self, m: int = 1000) -> None:
         """
-        Samples one model from the search space. Meant to be used in a oneshot
-        way, where only one model is needed.
+        Sample `m` models from each `SearchSpace` provided in the constructor.
+
+        Args:
+            m (int):
+                The amount of samples to be generated.
+        """
+        self._models = [list(islice(space, m)) for space in self._spaces]
+
+    def apply(
+        self,
+        fn: Callable[[Model, float, int], tuple[Any, ...]],
+        m: int | None = None
+    ) -> Iterator[tuple[SearchSpace, tuple[Any, ...]]]:
+        """
+        Apply the function `fn` to previously sampled models of the different
+        search spaces.
+
+        Args:
+            fn (Callable[[Model, float, int], tuple[Any, ...]]):
+                This function is applied to all models sampled.
+            m (int, None):
+                The number of samples per search space to iterate over. If `None`
+                iterate over all models.
 
         Returns:
-            Model:
-                A randomly sampled model from the MnasNet searchspace.
+            Iterator[tuple[SearchSpace, tuple[Any, ...]]]:
+                The results for all models of a search space and the search space
+                itself.
+
+        Raises:
+            RuntimeError:
+                If no models were sampled before this function is called.
         """
-        rng = np.random.default_rng()
-        return sample_model(rng, self.width_mult, self.resolution)
+        if not self._models:
+            raise RuntimeError("no models sampled")
 
-    def __iter__(self) -> 'SearchSpace':
-        if self._rng is None:
-            self._rng = np.random.default_rng()
+        for samples, space in zip(self._models, self._spaces):
+            sampled = len(samples)
+            end = min(m, sampled) if m is not None else sampled
 
-        return self
+            yield (
+                space,
+                (
+                    fn(model, space.width_mult, space.resolution)
+                    for model in samples[:end]
+                )
+            )
 
-    def __next__(self) -> Model:
-        if self._rng is None:
-            raise StopIteration()
+    def to_dict(self) -> dict[str, Any]:
+        """
+        Converts this instance of `SampleManager` to a `dict`. This can
+        then be used to save and reload this instance for later use. This way
+        the operations on the sampled models can be paused and later resumed.
 
-        return sample_model(self._rng, self.width_mult, self.resolution)
+        Returns:
+            dict[str, Any]:
+                A `dict` containing the content of this manager.
+        """
+        return {
+            "spaces": [
+                {
+                    "width_mult": space.width_mult,
+                    "resolution": space.resolution,
+                    "samples": [model.to_dict() for model in models]
+                }
+                for space, models in zip(self._spaces, self._models)
+            ]
+        }
+
+    @classmethod
+    def from_dict(
+        cls,
+        config: dict[str, Any],
+        space_factory: Callable[[float, int], SearchSpace]
+    ) -> 'SampleManager':
+        """
+        Converts a `dict` to a `SampleManager`.
+
+        Args:
+            config (dict[str, Any]):
+                The `dict` containing the content of a manager to be loaded.
+
+        Returns:
+            SampleManager:
+                The manager constructed from the `dict`.
+        """
+        spaces = [
+            space_factory(entry["width_mult"], entry["resolution"])
+            for entry in config["spaces"]
+        ]
+        manager = cls(spaces)
+
+        manager._models = [
+            [Model.from_dict(sample) for sample in entry.get("samples", [])]
+            for entry in config["spaces"]
+        ]
+
+        return manager

@@ -12,6 +12,7 @@ dependencies = [
     "torch",
     "torchvision",
     "torchprofile",
+    "tensorflow",
     "flatbuffers",
     "matplotlib",
     "pyqt6",

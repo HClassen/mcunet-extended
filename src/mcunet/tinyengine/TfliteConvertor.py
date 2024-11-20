@@ -139,6 +139,10 @@ class TfliteConvertor(object):
             self._convert_TRANSPOSE(op)
         elif op_code_str == "FULLY_CONNECTED":
             self.layer.append(TF_Parser.parse_fc(op, self.model))
+        elif op_code_str == "LOGISTIC":
+            pass
+        elif op_code_str == "MUL":
+            pass
         elif op_code_str in SKIP_OPs:
             pass
         else:

@@ -254,8 +254,12 @@ class Conv2d(basicOperator):
                         function_name = "convolve_s8_kernel3_inputch3_stride2_pad1"
             elif kernel_h == 3 and params["stride_h"] == 1 and params["padding"] == 1:
                 function_name = "convolve_s8_kernel3_stride1_pad1"
+            elif params["stride_h"] in [1, 2] and params["padding"] in [1, 2]:
+                stride = params["stride_h"]
+                padding = params["padding"]
+                function_name = f"convolve_s8_kernel{kernel_h}_stride{stride}_pad{padding}"
             else:
-                raise NotImplementedError
+                raise NotImplementedError(kernel_h, params["stride_h"], params["padding"])
 
             if fp_requantize and not ("is_patch" in params and params["is_patch"] and kernel_h > 1):
                 function_name += "_fpreq"

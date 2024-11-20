@@ -11,6 +11,8 @@ readme = "README.md"
 dependencies = [
     "torch",
     "torchvision",
+    "tensorflow",
+    "silence_tensorflow",
     "flatbuffers",
     "matplotlib",
     "pyqt6",

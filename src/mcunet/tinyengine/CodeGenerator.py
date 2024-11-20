@@ -378,6 +378,8 @@ void invoke_1patch(uint16_t pad_t, uint16_t pad_b, uint16_t pad_l ,uint16_t pad_
             string = "/* layer " + str(i) + ":" + layer_info["op"] + " */\n"
             fp.write(string)
 
+            print(i, layer_info["op"])
+
             if layer_info["op"] == "CONV_2D":
                 if (
                     self.FP_output

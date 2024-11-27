@@ -113,6 +113,9 @@ class BaseAllocator:
         return peak
 
     def visualize(self, path, train_start_idx=-1, scale=1024):
+        if path is None:
+            return
+
         fig = plt.figure()
         ax = fig.add_subplot(111)
         max_y = max_x = 0

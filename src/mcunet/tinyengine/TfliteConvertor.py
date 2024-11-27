@@ -28,10 +28,10 @@ from .tflite import Model
 
 # Parse tflite model into TinyEngine IR format
 class TfliteConvertor(object):
-    def __init__(self, filepath):
+    def __init__(self, model):
         # path to the tflite file
-        self.filepath = filepath
-        self.model = self.loadTFmodel(filepath)
+        # self.filepath = filepath
+        self.model = Model.Model.GetRootAsModel(model, 0)
         self.subgraph = self.model.Subgraphs(0)
         self.layer = []
         self.tmpPADIndice = None

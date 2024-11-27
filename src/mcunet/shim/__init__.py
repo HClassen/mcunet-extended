@@ -214,7 +214,8 @@ def get_train_datasets(
         seed=seed,
         validation_split=validation_split,
         subset=subset,
-        data_format="channels_last"
+        data_format="channels_last",
+        verbose=False
     )
 
 

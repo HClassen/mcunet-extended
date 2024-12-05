@@ -88,10 +88,10 @@ class OneShotNet(MobileSkeletonNet):
                     length,
                     block.in_channels,
                     block.out_channels,
-                    block.conv2d.stride,
+                    block.layers["conv2d"][0].stride,
                     block.expansion_ratio,
                     _get_conv_op(block),
-                    block.conv2d.kernel_size,
+                    block.layers["conv2d"][0].kernel_size,
                     block.se_ratio, block.skip
                 )
             )
@@ -312,11 +312,10 @@ def _reduce_channels(op: BaseOp, in_channels: int, out_channels: int) -> BaseOp:
     expansion_ratio = op.expansion_ratio
     se_ratio = op.se_ratio
     skip = op.skip
-    kernel_size = op.conv2d.kernel_size
-    stride = op.conv2d.stride
+    kernel_size = op.layers["conv2d"][0].kernel_size
+    stride = op.layers["conv2d"][0].stride
 
     reduced = None
-    squeeze = None
 
     if isinstance(op, Conv2dOp):
         reduced = Conv2dOp(
@@ -327,9 +326,10 @@ def _reduce_channels(op: BaseOp, in_channels: int, out_channels: int) -> BaseOp:
             kernel_size,
             stride,
         )
-        squeeze = 1
 
-        _copy_conv2d(reduced.layers[0], op.layers[0], in_channels, out_channels)
+        _copy_conv2d(
+            reduced.layers["conv2d"], op.layers["conv2d"], in_channels, out_channels
+        )
 
         in_channels = out_channels
     elif isinstance(op, DWConv2dOp):
@@ -341,15 +341,17 @@ def _reduce_channels(op: BaseOp, in_channels: int, out_channels: int) -> BaseOp:
             kernel_size,
             stride,
         )
-        squeeze = 1
 
-        _copy_conv2d(reduced.layers[0], op.layers[0], in_channels, in_channels)
-
-        i = 2 if se_ratio > 0.0 else 1
-        reduced.layers[i].weight = nn.Parameter(
-            op.layers[i].weight[:out_channels, :in_channels]
+        _copy_conv2d(
+            reduced.layers["expand"], op.layers["expand"], in_channels, in_channels
         )
-        _copy_batchnorm(reduced.layers[i + 1], op.layers[i + 1], out_channels)
+
+        reduced.layers["spconv2d"].weight = nn.Parameter(
+            op.layers["spconv2d"].weight[:out_channels, :in_channels]
+        )
+        _copy_batchnorm(
+            reduced.layers["spbatchnorm"], op.layers["spbatchnorm"], out_channels
+        )
     elif isinstance(op, MBConv2dOp):
         reduced = MBConv2dOp(
             in_channels,
@@ -360,38 +362,41 @@ def _reduce_channels(op: BaseOp, in_channels: int, out_channels: int) -> BaseOp:
             kernel_size,
             stride,
         )
-        squeeze = 2 if expansion_ratio > 1 else 1
 
         hidden = in_channels * expansion_ratio
         if expansion_ratio > 1:
-            _copy_conv2d(reduced.layers[0], op.layers[0], in_channels, hidden)
+            _copy_conv2d(
+                reduced.layers["expand"], op.layers["expand"], in_channels, hidden
+            )
 
-        i = 1 if expansion_ratio > 1 else 0
-        _copy_conv2d(reduced.layers[i], op.layers[i], hidden, hidden)
-
-        i += 2 if se_ratio > 0.0 else 1
-        reduced.layers[i].weight = nn.Parameter(
-            op.layers[i].weight[:out_channels, :hidden]
+        _copy_conv2d(
+            reduced.layers["conv2d"], op.layers["conv2d"], hidden, hidden
         )
-        _copy_batchnorm(reduced.layers[i + 1], op.layers[i + 1], out_channels)
+
+        reduced.layers["spconv2d"].weight = nn.Parameter(
+            op.layers["spconv2d"].weight[:out_channels, :hidden]
+        )
+        _copy_batchnorm(
+            reduced.layers["spbatchnorm"], op.layers["spbatchnorm"], out_channels
+        )
 
         in_channels = hidden
     else:
         raise Exception(f"unknown operation {type(op)}")
 
     if se_ratio > 0.0:
-        out, _, _, _ = reduced.layers[squeeze].fc1.weight.size()
+        out, _, _, _ = reduced.layers["se"].fc1.weight.size()
 
         _copy_squeeze(
-            reduced.layers[squeeze].fc1,
-            op.layers[squeeze].fc1,
+            reduced.layers["se"].fc1,
+            op.layers["se"].fc1,
             in_channels,
             out
         )
 
         _copy_squeeze(
-            reduced.layers[squeeze].fc2,
-            op.layers[squeeze].fc2,
+            reduced.layers["se"].fc2,
+            op.layers["se"].fc2,
             out,
             in_channels
         )
@@ -481,8 +486,8 @@ def crossover(p1: OneShotNet, p2: OneShotNet) -> OneShotNet:
 
 def mutate(oneshot: OneShotNet, p: float) -> OneShotNet:
     """
-    Mutate the weights of the conv2ds of the seven blocks. For each weights if
-    the threshold ``p`` is passed add gaussian noise with std = 0.1.
+    Mutate the weights of the conv2d and linear layers. For each weights if the
+    threshold ``p`` is passed add gaussian noise with std = 0.1.
 
     Args:
         oneshot (OneShotNet):
@@ -494,24 +499,38 @@ def mutate(oneshot: OneShotNet, p: float) -> OneShotNet:
         OneShotNet:
             The mutated net.
     """
+    # Helper to mutate only Linear and Conv2d.
+    def maybe_mutate(m: nn.Module) -> None:
+        if isinstance(m, (nn.Linear, nn.Conv2d)) and torch.rand(1).item() < p:
+            with torch.no_grad():
+                m.weight += torch.rand_like(m.weight) * 0.1
+
+    first = deepcopy(oneshot.first)
+    for m in first.modules():
+        maybe_mutate(m)
+
     blocks: list[BaseOp] = []
     for block in oneshot.blocks:
         block = deepcopy(block)
 
-        if torch.rand(1).item() < p:
-            block = cast(BaseOp, block)
-
-            with torch.no_grad():
-                block.conv2d.weight += \
-                    torch.rand_like(block.conv2d.weight) * 0.1
+        for m in block.modules():
+            maybe_mutate(m)
 
         blocks.append(block)
 
+    last = deepcopy(oneshot.last)
+    for m in last.modules():
+        maybe_mutate(m)
+
+    classifier = deepcopy(oneshot.classifier)
+    for m in classifier.modules():
+        maybe_mutate(m)
+
     return OneShotNet(
-        oneshot.first,
+        first,
         blocks,
-        oneshot.last,
+        last,
         oneshot.pool,
-        oneshot.classifier,
+        classifier,
         oneshot._block_lengths
     )

@@ -381,7 +381,12 @@ class SearchManager():
         self._train_ds, self._valid_ds = random_split(ds, [0.85, 0.15])
 
     def _warm_up(
-        self, op: ConvOp, warm_up_epochs: int, batch_size: int, device=None
+        self,
+        op: ConvOp,
+        warm_up_epochs: int,
+        warm_up_batches: int | None,
+        batch_size: int,
+        device=None
     ) -> None:
         max_model = uniform_model(
             op,
@@ -399,7 +404,7 @@ class SearchManager():
         net.to(device)
 
         dl = DataLoader(self._train_ds, batch_size, shuffle=True)
-        batches = len(dl)
+        batches = len(dl) if warm_up_batches is None else warm_up_batches
 
         criterion = nn.CrossEntropyLoss()
         optimizer = torch.optim.SGD(
@@ -433,6 +438,9 @@ class SearchManager():
 
                 print(f", time={batch_time:.2f}s")
 
+                if batches == k + 1:
+                    break
+
             epoch_time = time.time() - epoch_start
 
             print()
@@ -447,7 +455,7 @@ class SearchManager():
                 layer = cast(BaseChoiceOp, layer)
                 src = cast(BaseOp, net.blocks[i * max(LAYER_CHOICES) + j])
 
-                weight = src["conv2d"][0].weight
+                weight = src.layers["conv2d"][0].weight
 
                 # Sort channels by L1 norm. The higher the better.
                 importance: list[tuple[int, float]] = []
@@ -459,15 +467,17 @@ class SearchManager():
 
                 with torch.no_grad():
                     for k, (channel, _) in enumerate(importance):
-                        layer.weight[k] = weight[channel]
+                        layer.weight[k].copy_(weight[channel])
 
     def train(
         self,
         epochs: int = 300,  # Twice ``warm_up_epochs``
+        batches: int | None = None,
         batch_size: int = 256,
         models_per_batch: int = 4,
         warm_up: bool = True,
         warm_up_epochs: int = 150,
+        warm_up_batches: int | None = None,
         warm_up_batch_size: int = 256,
         device=None
     ) -> None:
@@ -479,6 +489,9 @@ class SearchManager():
         Args:
             epochs (int):
                 The number of training epochs.
+            batches (int, None):
+                The number of batches per epoch. If set to ``None`` use the whole
+                training data set.
             batch_size (int):
                 The number of samples per batch for training.
             models_per_batch (int):
@@ -486,6 +499,10 @@ class SearchManager():
             warm_up (bool):
                 If set to ``True`` train the largest sub-networks of the
                 ``SuperNet`` first to start the training with bettwer weights.
+            warm_up_batches (int, None):
+                The number of batches per warm up epoch. If set to ``None`` use
+                the whole training data set. Only relevant if ``warm_up`` is
+                ``True``.
             warm_up_epochs (int):
                 The number of warm up epochs. Only relevant if ``warm_up`` is
                 ``True``.
@@ -495,13 +512,13 @@ class SearchManager():
         """
         if warm_up:
             self._warm_up(
-                ConvOp.CONV2D, warm_up_epochs, warm_up_batch_size, device
+                ConvOp.CONV2D, warm_up_epochs, warm_up_batches, warm_up_batch_size, device
             )
             self._warm_up(
-                ConvOp.DWCONV2D, warm_up_epochs, warm_up_batch_size, device
+                ConvOp.DWCONV2D, warm_up_epochs, warm_up_batches, warm_up_batch_size, device
             )
             self._warm_up(
-                ConvOp.MBCONV2D, warm_up_epochs, warm_up_batch_size, device
+                ConvOp.MBCONV2D, warm_up_epochs, warm_up_batches, warm_up_batch_size, device
             )
 
         models = iter(self._space)
@@ -509,7 +526,7 @@ class SearchManager():
         self._supernet.to(device)
 
         dl = DataLoader(self._train_ds, batch_size, shuffle=True)
-        batches = len(dl)
+        batches = len(dl) if batches is None else batches
 
         criterion = nn.CrossEntropyLoss()
         optimizer = torch.optim.SGD(
@@ -551,6 +568,9 @@ class SearchManager():
                 batch_time = time.time() - batch_start
 
                 print(f", time={batch_time:.2f}s")
+
+                if batches == k + 1:
+                    break
 
             epoch_time = time.time() - epoch_start
 

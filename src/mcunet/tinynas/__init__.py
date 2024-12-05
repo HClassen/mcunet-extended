@@ -302,6 +302,56 @@ class SampleManager():
         return manager
 
 
+def _sort_channels(weight: torch.Tensor) -> torch.Tensor:
+    # Sort channels by L1 norm. The higher the better.
+    importance: list[tuple[int, float]] = []
+    for channel in range(weight.size()[0]):
+        l1 = la.norm(weight[channel].view(-1), ord=1)
+        insort_left(
+            importance, (channel, l1), key=lambda entry: -entry[1]
+        )
+
+    reordered = torch.empty_like(weight)
+    with torch.no_grad():
+        for k, (channel, _) in enumerate(importance):
+            reordered[k].copy_(weight[channel])
+
+    return reordered
+
+
+def _get_warm_up_common(
+    src: BaseOp
+) -> tuple[nn.Parameter, nn.Parameter, nn.Parameter]:
+    weight_conv2d = _sort_channels(src.layers["conv2d"][0].weight)
+    weight_fc1 = _sort_channels(src.layers["se"].fc1.weight)
+    weight_fc2 = _sort_channels(src.layers["se"].fc2.weight)
+
+    return (weight_conv2d, weight_fc1, weight_fc2)
+
+
+def _set_warm_up_conv2d(src: BaseOp, layer: BaseChoiceOp) -> None:
+    weight_conv2d, weight_fc1, weight_fc2 = _get_warm_up_common(src)
+
+    layer.set_weights(weight_conv2d, weight_fc1, weight_fc2)
+
+
+def _set_warm_up_dwconv2d(src: BaseOp, layer: BaseChoiceOp) -> None:
+    weight_conv2d, weight_fc1, weight_fc2 = _get_warm_up_common(src)
+    weight_spconv2d = _sort_channels(src.layers["spconv2d"].weight)
+
+    layer.set_weights(weight_conv2d, weight_fc1, weight_fc2, weight_spconv2d)
+
+
+def _set_warm_up_mbconv2d(src: BaseOp, layer: BaseChoiceOp) -> None:
+    weight_conv2d, weight_fc1, weight_fc2 = _get_warm_up_common(src)
+    weight_expand = _sort_channels(src.layers["expand"][0].weight)
+    weight_spconv2d = _sort_channels(src.layers["spconv2d"].weight)
+
+    layer.set_weights(
+        weight_expand, weight_conv2d, weight_fc1, weight_fc2, weight_spconv2d
+    )
+
+
 def _adjust_learning_rate(
     optimizer: torch.optim.Optimizer,
     epoch: int,
@@ -391,7 +441,7 @@ class SearchManager():
         max_model = uniform_model(
             op,
             max(KERNEL_CHOICES),
-            min(SE_CHOICES),
+            max(SE_CHOICES),
             SkipOp.NOSKIP,
             max(LAYER_CHOICES),
             max(CHANNEL_CHOICES),
@@ -455,19 +505,13 @@ class SearchManager():
                 layer = cast(BaseChoiceOp, layer)
                 src = cast(BaseOp, net.blocks[i * max(LAYER_CHOICES) + j])
 
-                weight = src.layers["conv2d"][0].weight
-
-                # Sort channels by L1 norm. The higher the better.
-                importance: list[tuple[int, float]] = []
-                for channel in range(weight.size()[0]):
-                    l1 = la.norm(weight[channel].view(-1), ord=1)
-                    insort_left(
-                        importance, (channel, l1), key=lambda entry: -entry[1]
-                    )
-
-                with torch.no_grad():
-                    for k, (channel, _) in enumerate(importance):
-                        layer.weight[k].copy_(weight[channel])
+                match op:
+                    case ConvOp.CONV2D:
+                        _set_warm_up_conv2d(src, layer)
+                    case ConvOp.DWCONV2D:
+                        _set_warm_up_dwconv2d(src, layer)
+                    case ConvOp.MBCONV2D:
+                        _set_warm_up_mbconv2d(src, layer)
 
     def train(
         self,

@@ -447,7 +447,7 @@ class SearchManager():
                 layer = cast(BaseChoiceOp, layer)
                 src = cast(BaseOp, net.blocks[i * max(LAYER_CHOICES) + j])
 
-                weight = src.conv2d.weight
+                weight = src["conv2d"][0].weight
 
                 # Sort channels by L1 norm. The higher the better.
                 importance: list[tuple[int, float]] = []

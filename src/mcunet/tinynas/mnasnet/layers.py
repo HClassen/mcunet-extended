@@ -12,7 +12,7 @@ __all__ = ["BaseOp", "Conv2dOp", "DWConv2d", "MBConv2d"]
 
 
 def _add_se(
-    layers: list[nn.Module],
+    layers: list[tuple[str, nn.Module]],
     in_channels: int,
     se_ratio: float,
     activation_layer: Callable[..., nn.Module] | None = nn.ReLU6
@@ -25,12 +25,15 @@ def _add_se(
     squeeze_channels = max(1, int(in_channels * se_ratio))
 
     layers.append(
-        SqueezeExcitation(in_channels, squeeze_channels, activation_layer)
+        (
+            "se",
+            SqueezeExcitation(in_channels, squeeze_channels, activation_layer)
+        )
     )
 
 
 class BaseOp(ABC, nn.Module):
-    layers: nn.Sequential
+    layers: nn.ModuleDict
     use_residual: bool
 
     # Configuration of this operation. The rest can be extracted from the
@@ -62,19 +65,15 @@ class BaseOp(ABC, nn.Module):
         self.se_ratio = se_ratio
         self.skip = skip
 
-    @property
-    @abstractmethod
-    def conv2d(self) -> nn.Conv2d:
-        """
-        Get the main conv2d for the complete operation.
-        """
-        pass
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        outputs = inputs
+        for layer in self.layers.values():
+            outputs = layer(outputs)
 
-    def forward(self, input: torch.Tensor) -> torch.Tensor:
         if self.use_residual:
-            return input + self.layers(input)
-        else:
-            return self.layers(input)
+            inputs = inputs + outputs
+
+        return outputs
 
 
 class Conv2dOp(BaseOp):
@@ -84,7 +83,7 @@ class Conv2dOp(BaseOp):
         out_channels: int,
         se_ratio: float,
         skip: bool,
-        kernel_size: _size_2_t = 3,
+        kernel_size: _size_2_t,
         stride: _size_2_t = 1,
         norm_layer: Callable[..., nn.Module] | None = nn.BatchNorm2d,
         activation_layer: Callable[..., nn.Module] | None = nn.ReLU6
@@ -93,25 +92,24 @@ class Conv2dOp(BaseOp):
             in_channels, out_channels, 1, se_ratio, skip, stride
         )
 
-        layers: list[nn.Module] = [
-            Conv2dNormActivation(
-                in_channels,
-                out_channels,
-                kernel_size,
-                stride,
-                norm_layer=norm_layer,
-                activation_layer=activation_layer,
-                inplace=True
+        layers: list[tuple[str, nn.Module]] = [
+            (
+                "conv2d",
+                Conv2dNormActivation(
+                        in_channels,
+                        out_channels,
+                        kernel_size,
+                        stride,
+                        norm_layer=norm_layer,
+                        activation_layer=activation_layer,
+                        inplace=True
+                )
             )
         ]
 
         _add_se(layers, out_channels, se_ratio, activation_layer)
 
-        self.layers = nn.Sequential(*layers)
-
-    @property
-    def conv2d(self) -> nn.Conv2d:
-        return self.layers[0][0]
+        self.layers = nn.ModuleDict(layers)
 
 
 class DWConv2dOp(BaseOp):
@@ -121,7 +119,7 @@ class DWConv2dOp(BaseOp):
         out_channels: int,
         se_ratio: float,
         skip: bool,
-        kernel_size: _size_2_t = 3,
+        kernel_size: _size_2_t,
         stride: _size_2_t = 1,
         norm_layer: Callable[..., nn.Module] | None = nn.BatchNorm2d,
         activation_layer: Callable[..., nn.Module] | None = nn.ReLU6
@@ -130,16 +128,19 @@ class DWConv2dOp(BaseOp):
             in_channels, out_channels, 1, se_ratio, skip, stride
         )
 
-        layers: list[nn.Module] = [
-            Conv2dNormActivation(
-                in_channels,
-                in_channels,
-                kernel_size,
-                stride,
-                groups=in_channels,
-                norm_layer=norm_layer,
-                activation_layer=activation_layer,
-                inplace=True
+        layers: list[tuple[str, nn.Module]] = [
+            (
+                "conv2d",  # depthwise
+                Conv2dNormActivation(
+                    in_channels,
+                    in_channels,
+                    kernel_size,
+                    stride,
+                    groups=in_channels,
+                    norm_layer=norm_layer,
+                    activation_layer=activation_layer,
+                    inplace=True
+                )
             )
         ]
 
@@ -150,22 +151,21 @@ class DWConv2dOp(BaseOp):
         _add_se(layers, in_channels, se_ratio, activation_layer)
 
         layers.extend([
-            nn.Conv2d(
-                in_channels,
-                out_channels,
-                kernel_size=1,
-                stride=1,
-                padding=0,
-                bias=False
+            (
+                "spconv2d",  # seperable
+                nn.Conv2d(
+                    in_channels,
+                    out_channels,
+                    kernel_size=1,
+                    stride=1,
+                    padding=0,
+                    bias=False
+                )
             ),
-            norm_layer(out_channels)
+            ("spbatchnorm", norm_layer(out_channels))
         ])
 
-        self.layers = nn.Sequential(*layers)
-
-    @property
-    def conv2d(self) -> nn.Conv2d:
-        return self.layers[0][0]
+        self.layers = nn.ModuleDict(layers)
 
 
 class MBConv2dOp(BaseOp):
@@ -176,7 +176,7 @@ class MBConv2dOp(BaseOp):
         expansion_ratio: int,
         se_ratio: float,
         skip: bool,
-        kernel_size: _size_2_t = 3,
+        kernel_size: _size_2_t,
         stride: _size_2_t = 1,
         norm_layer: Callable[..., nn.Module] | None = nn.BatchNorm2d,
         activation_layer: Callable[..., nn.Module] | None = nn.ReLU6
@@ -186,52 +186,54 @@ class MBConv2dOp(BaseOp):
         )
 
         hidden = in_channels * expansion_ratio
-        layers: list[nn.Module] = []
+        layers: list[tuple[str, nn.Module]] = []
 
         if expansion_ratio > 1:
             layers.append(
-                Conv2dNormActivation(
-                    in_channels,
-                    hidden,
-                    kernel_size=1,
-                    norm_layer=norm_layer,
-                    activation_layer=activation_layer,
-                    inplace=True
+                (
+                    "expand",
+                    Conv2dNormActivation(
+                        in_channels,
+                        hidden,
+                        kernel_size=1,
+                        norm_layer=norm_layer,
+                        activation_layer=activation_layer,
+                        inplace=True
+                    )
                 )
             )
 
         layers.append(
-            Conv2dNormActivation(
-                hidden,
-                hidden,
-                kernel_size,
-                stride,
-                groups=hidden,
-                norm_layer=norm_layer,
-                activation_layer=activation_layer,
-                inplace=True
+            (
+                "conv2d",  # depthwise
+                Conv2dNormActivation(
+                    hidden,
+                    hidden,
+                    kernel_size,
+                    stride,
+                    groups=hidden,
+                    norm_layer=norm_layer,
+                    activation_layer=activation_layer,
+                    inplace=True
+                )
             )
         )
 
         _add_se(layers, hidden, se_ratio, activation_layer)
 
         layers.extend([
-            nn.Conv2d(
-                hidden,
-                out_channels,
-                kernel_size=1,
-                stride=1,
-                padding=0,
-                bias=False
+            (
+                "spconv2d",  # seperable
+                nn.Conv2d(
+                    hidden,
+                    out_channels,
+                    kernel_size=1,
+                    stride=1,
+                    padding=0,
+                    bias=False
+                )
             ),
-            norm_layer(out_channels)
+            ("spbatchnorm", norm_layer(out_channels))
         ])
 
-        self.layers = nn.Sequential(*layers)
-
-    @property
-    def conv2d(self) -> nn.Conv2d:
-        if self.expansion_ratio == 1:
-            return self.layers[0][0]
-
-        return self.layers[1][0]
+        self.layers = nn.ModuleDict(layers)

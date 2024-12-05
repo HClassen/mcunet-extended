@@ -174,7 +174,7 @@ class SuperNet(MobileSkeletonNet):
 
         for m in self.blocks.modules():
             if isinstance(m, BaseChoiceOp):
-                nn.init.kaiming_normal_(m.weight, mode="fan_out")
+                m.initialize_shared_weights()
 
         nn.init.kaiming_normal_(self.last.weight, mode="fan_out")
 
@@ -224,14 +224,14 @@ class SuperNet(MobileSkeletonNet):
                 if layer.active is None:
                     raise Exception("no choice was selected")
 
-                layer._share_weight(layer.active)
+                layer._set_weight(layer.active)
 
                 blocks.append(layer.active)
 
         if self.last.active is None:
             raise Exception("no choice was selected")
 
-        self.last._share_weight(self.last.active)
+        self.last._set_weight(self.last.active)
         last = self.last.active
 
         if copy:
@@ -343,7 +343,7 @@ def _reduce_channels(op: BaseOp, in_channels: int, out_channels: int) -> BaseOp:
         )
 
         _copy_conv2d(
-            reduced.layers["expand"], op.layers["expand"], in_channels, in_channels
+            reduced.layers["conv2d"], op.layers["conv2d"], in_channels, in_channels
         )
 
         reduced.layers["spconv2d"].weight = nn.Parameter(

@@ -4,12 +4,10 @@ from collections.abc import Iterator, Iterable, Callable
 
 import torch
 import torch.nn as nn
-from torch.nn.common_types import _size_2_t
 
 from torchvision.ops import Conv2dNormActivation
 
 from ..mnasnet import (
-    CHANNEL_CHOICES,
     KERNEL_CHOICES,
     SE_CHOICES,
     SKIP_CHOICES,
@@ -35,20 +33,51 @@ def _permutations() -> Iterator[tuple[int, float, SkipOp]]:
                 yield (k, se, skip)
 
 
+def _share_weight_conv2d(conv2d: nn.Conv2d, weight: nn.Parameter) -> None:
+    _, _, shared_h, shared_w = weight.size()
+
+    shared_hc = int((shared_h - 1) / 2)
+    shared_wc = int((shared_w - 1) / 2)
+
+    c_out = conv2d.out_channels
+    c_in = int(conv2d.in_channels / conv2d.groups)
+
+    if isinstance(conv2d.kernel_size, tuple):
+        h, w = conv2d.kernel_size
+    else:
+        h, w = conv2d.kernel_size, conv2d.kernel_size
+
+    hc = int((h - 1) / 2)
+    wc = int((w - 1) / 2)
+
+    h_start = shared_hc - hc
+    h_end = shared_hc + hc + 1
+
+    w_start = shared_wc - wc
+    w_end = shared_wc + wc + 1
+
+    conv2d.weight = nn.Parameter(
+        weight[:c_out, :c_in, h_start:h_end, w_start:w_end]
+    )
+
+
 class BaseChoiceOp(ABC, nn.Module):
     """
     Represents a single layer in the MobileNetV2 like one-shot NAS network. This
     is a base class and is meant to be inherited from. A subclass must implement
     two methods:
-    1. ``_build_op``: returns an instance of a MnsaNet layer
-    2. ``_make_shared``: creates the weight tensor shared by the conv2d
-        operations
+    1. ``_make_shared``: creates the shared weight tensors shared
+    2. ``_make_choices``: creates the choices for an operation type
     """
     active: BaseOp | None
     in_channels: Iterable[int]
     out_channels: Iterable[int]
 
-    weight: nn.Parameter
+    # Shared weights common to all operations.
+    weight_conv2d: nn.Parameter
+    weight_fc1: nn.Parameter
+    weight_fc2: nn.Parameter
+
     choices: nn.ModuleList
 
     def __init__(
@@ -69,51 +98,22 @@ class BaseChoiceOp(ABC, nn.Module):
         max_kernel_size = max(KERNEL_CHOICES)
         max_expansion_ratio = max(range_expansion_ratios)
 
-        self.weight = nn.Parameter(
-            self._make_shared(
-                max_in_channels,
-                max_out_channels,
-                max_kernel_size,
-                max_expansion_ratio
-            )
+        self._make_shared(
+            max_in_channels,
+            max_out_channels,
+            max_kernel_size,
+            max_expansion_ratio
         )
 
-        choices = []
-
-        for i in range_in_channels:
-            for j in range_out_channels:
-                for e in range_expansion_ratios:
-                    for k, se, skip in _permutations():
-                        choice = self._build_op(
-                            i, j, se, skip, k,
-                            stride,
-                            e,
-                            norm_layer,
-                            activation_layer
-                        )
-                        choice.layers["conv2d"][0].weight = None
-
-                        choices.append(choice)
+        choices = self._make_choices(
+            range_in_channels, range_out_channels, range_expansion_ratios,
+            stride, norm_layer, activation_layer
+        )
 
         self.choices = nn.ModuleList(choices)
 
         self.in_channels = range_in_channels
         self.out_channels = range_out_channels
-
-    @abstractmethod
-    def _build_op(
-        self,
-        in_channels: int,
-        out_channels: int,
-        se_ratio: float,
-        skip_op: SkipOp,
-        kernel_size: int,
-        stride: int,
-        expansion_ratio: int,
-        norm_layer: Callable[..., nn.Module] | None = nn.BatchNorm2d,
-        activation_layer: Callable[..., nn.Module] | None = nn.ReLU6
-    ) -> BaseOp:
-        pass
 
     @abstractmethod
     def _make_shared(
@@ -122,37 +122,54 @@ class BaseChoiceOp(ABC, nn.Module):
         max_out_channels: int,
         max_kernel_size: int,
         max_expansion_ratio: int
-    ) -> torch.Tensor:
+    ) -> None:
         pass
 
-    def _share_weight(self, choice: BaseOp) -> None:
-        _, _, shared_h, shared_w = self.weight.size()
+    @abstractmethod
+    def _make_choices(
+        self,
+        range_in_channels: Iterable[int],
+        range_out_channels: Iterable[int],
+        range_expansion_ratios: Iterable[int],
+        stride: int,
+        norm_layer: Callable[..., nn.Module] | None = nn.BatchNorm2d,
+        activation_layer: Callable[..., nn.Module] | None = nn.ReLU6
+    ) -> list[BaseOp]:
+        pass
 
-        shared_hc = int((shared_h - 1) / 2)
-        shared_wc = int((shared_w - 1) / 2)
+    def _set_weight(self, choice: BaseOp) -> None:
+        _share_weight_conv2d(choice.layers["conv2d"][0], self.weight_conv2d)
 
-        conv2d = choice.layers["conv2d"][0]
+        if "se" in choice.layers:
+            _share_weight_conv2d(choice.layers["se"].fc1, self.weight_fc1)
+            _share_weight_conv2d(choice.layers["se"].fc2, self.weight_fc2)
 
-        c_out = conv2d.out_channels
-        c_in = int(conv2d.in_channels / conv2d.groups)
+        self._post_set_weight(choice)
 
-        if isinstance(conv2d.kernel_size, tuple):
-            h, w = conv2d.kernel_size
-        else:
-            h, w = conv2d.kernel_size, conv2d.kernel_size
+    def _post_set_weight(self, choice: BaseOp) -> None:
+        pass
 
-        hc = int((h - 1) / 2)
-        wc = int((w - 1) / 2)
+    def _unset_weight(self, choice: BaseOp) -> None:
+        choice.layers["conv2d"][0].weight = None
 
-        h_start = shared_hc - hc
-        h_end = shared_hc + hc + 1
+        if "se" in choice.layers:
+            choice.layers["se"].fc1.weight = None
+            choice.layers["se"].fc2.weight = None
 
-        w_start = shared_wc - wc
-        w_end = shared_wc + wc + 1
+        self._post_unset_weight(choice)
 
-        conv2d.weight = nn.Parameter(
-            self.weight[:c_out, :c_in, h_start:h_end, w_start:w_end]
-        )
+    def _post_unset_weight(self, choice: BaseOp) -> None:
+        pass
+
+    def initialize_shared_weights(self) -> None:
+        nn.init.kaiming_normal_(self.weight_conv2d, mode="fan_out")
+        nn.init.kaiming_normal_(self.weight_fc1, mode="fan_out")
+        nn.init.kaiming_normal_(self.weight_fc2, mode="fan_out")
+
+        self._post_initialize_shared_weights()
+
+    def _post_initialize_shared_weights(self) -> None:
+        pass
 
     def set(
         self,
@@ -182,13 +199,43 @@ class BaseChoiceOp(ABC, nn.Module):
         if self.active is None:
             raise Exception(f"no suitable choice found")
 
+    def _set_weights_common(
+        self,
+        weight_conv2d: torch.Tensor,
+        weight_fc1: torch.Tensor,
+        weight_fc2: torch.Tensor
+    ) -> None:
+        if self.weight_conv2d.size() != weight_conv2d.size():
+            raise Exception(
+                f"conv2d: missmatch of dimensions: {self.weight_conv2d.size()} != {weight_conv2d.size()}"
+            )
+
+        if self.weight_fc1.size() != weight_fc1.size():
+            raise Exception(
+                f"fc1: missmatch of dimensions: {self.weight_fc1.size()} != {weight_fc1.size()}"
+            )
+
+        if self.weight_fc2.size() != weight_fc2.size():
+            raise Exception(
+                f"fc2: missmatch of dimensions: {self.weight_fc2.size()} != {weight_fc2.size()}"
+            )
+
+        with torch.no_grad():
+            self.weight_conv2d.copy_(weight_conv2d)
+            self.weight_fc1.copy_(weight_fc1)
+            self.weight_fc2.copy_(weight_fc2)
+
+    @abstractmethod
+    def set_weights(self) -> None:
+        pass
+
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
         if self.active is None:
             raise Exception("no choice was selected")
 
-        self._share_weight(self.active)
+        self._set_weight(self.active)
         output = self.active(inputs)
-        self.active.layers["conv2d"][0].weight = None
+        self._unset_weight(self.active)
 
         return output
 
@@ -198,42 +245,70 @@ class Conv2dChoiceOp(BaseChoiceOp):
     A concrete instance of a ``BaseChoiceOp`` which contains ``Conv2dOp`` of the
     MnasNet search space.
     """
-    def _build_op(
-        self,
-        in_channels: int,
-        out_channels: int,
-        se_ratio: float,
-        skip_op: SkipOp,
-        kernel_size: int,
-        stride: int,
-        _: int,
-        norm_layer: Callable[..., nn.Module] | None = nn.BatchNorm2d,
-        activation_layer: Callable[..., nn.Module] | None = nn.ReLU6
-    ) -> BaseOp:
-        return Conv2dOp(
-            in_channels,
-            out_channels,
-            se_ratio,
-            skip_op,
-            kernel_size,
-            stride,
-            norm_layer,
-            activation_layer
-        )
-
     def _make_shared(
         self,
         max_in_channels: int,
         max_out_channels: int,
         max_kernel_size: int,
         max_extension_ratio: int
-    ) -> torch.Tensor:
-        return torch.Tensor(
-            max_out_channels,
-            max_in_channels,
-            max_kernel_size,
-            max_kernel_size
+    ) -> None:
+        self.weight_conv2d = nn.Parameter(
+            torch.Tensor(
+                max_out_channels,
+                max_in_channels,
+                max_kernel_size,
+                max_kernel_size
+            )
         )
+
+        squeeze_channels = max(1, int(max_out_channels * max(SE_CHOICES)))
+
+        self.weight_fc1 = nn.Parameter(
+            torch.Tensor(
+                squeeze_channels,
+                max_out_channels,
+                1, 1
+            )
+        )
+
+        self.weight_fc2 = nn.Parameter(
+            torch.Tensor(
+                max_out_channels,
+                squeeze_channels,
+                1, 1
+            )
+        )
+
+    def _make_choices(
+        self,
+        range_in_channels: Iterable[int],
+        range_out_channels: Iterable[int],
+        _: Iterable[int],
+        stride: int,
+        norm_layer: Callable[..., nn.Module] | None = nn.BatchNorm2d,
+        activation_layer: Callable[..., nn.Module] | None = nn.ReLU6
+    ) -> list[Conv2dOp]:
+        choices: list[Conv2dOp] = []
+
+        for i in range_in_channels:
+            for j in range_out_channels:
+                for k, se, skip in _permutations():
+                    choice = Conv2dOp(
+                        i, j, se, skip, k, stride, norm_layer, activation_layer
+                    )
+                    self._unset_weight(choice)
+
+                    choices.append(choice)
+
+        return choices
+
+    def set_weights(
+        self,
+        weight_conv2d: torch.Tensor,
+        weight_fc1: torch.Tensor,
+        weight_fc2: torch.Tensor
+    ) -> None:
+        self._set_weights_common(weight_conv2d, weight_fc1, weight_fc2)
 
 
 class DWConv2dChoiceOp(BaseChoiceOp):
@@ -241,28 +316,7 @@ class DWConv2dChoiceOp(BaseChoiceOp):
     A concrete instance of a ``BaseChoiceOp`` which contains ``DWConv2dOp`` of
     the MnasNet search space.
     """
-    def _build_op(
-        self,
-        in_channels: int,
-        out_channels: int,
-        se_ratio: float,
-        skip_op: SkipOp,
-        kernel_size: int,
-        stride: int,
-        _: int,
-        norm_layer: Callable[..., nn.Module] | None = nn.BatchNorm2d,
-        activation_layer: Callable[..., nn.Module] | None = nn.ReLU6
-    ) -> BaseOp:
-        return DWConv2dOp(
-            in_channels,
-            out_channels,
-            se_ratio,
-            skip_op,
-            kernel_size,
-            stride,
-            norm_layer,
-            activation_layer
-        )
+    weight_spconv2d: nn.Parameter
 
     def _make_shared(
         self,
@@ -270,13 +324,90 @@ class DWConv2dChoiceOp(BaseChoiceOp):
         max_out_channels: int,
         max_kernel_size: int,
         max_extension_ratio: int
-    ) -> torch.Tensor:
-        return torch.Tensor(
-            max_in_channels,
-            1,
-            max_kernel_size,
-            max_kernel_size
+    ) -> None:
+        self.weight_conv2d = nn.Parameter(
+            torch.Tensor(
+                max_in_channels,
+                1,
+                max_kernel_size,
+                max_kernel_size
+            )
         )
+
+        squeeze_channels = max(1, int(max_in_channels * max(SE_CHOICES)))
+
+        self.weight_fc1 = nn.Parameter(
+            torch.Tensor(
+                squeeze_channels,
+                max_in_channels,
+                1, 1
+            )
+        )
+
+        self.weight_fc2 = nn.Parameter(
+            torch.Tensor(
+                max_in_channels,
+                squeeze_channels,
+                1, 1
+            )
+        )
+
+        self.weight_spconv2d = nn.Parameter(
+            torch.Tensor(
+                max_out_channels,
+                max_in_channels,
+                1, 1
+            )
+        )
+
+    def _make_choices(
+        self,
+        range_in_channels: Iterable[int],
+        range_out_channels: Iterable[int],
+        _: Iterable[int],
+        stride: int,
+        norm_layer: Callable[..., nn.Module] | None = nn.BatchNorm2d,
+        activation_layer: Callable[..., nn.Module] | None = nn.ReLU6
+    ) -> list[DWConv2dOp]:
+        choices: list[DWConv2dOp] = []
+
+        for i in range_in_channels:
+            for j in range_out_channels:
+                for k, se, skip in _permutations():
+                    choice = DWConv2dOp(
+                        i, j, se, skip, k, stride, norm_layer, activation_layer
+                    )
+                    self._unset_weight(choice)
+
+                    choices.append(choice)
+
+        return choices
+
+    def _post_set_weight(self, choice: BaseOp) -> None:
+        _share_weight_conv2d(choice.layers["spconv2d"], self.weight_spconv2d)
+
+    def _post_unset_weight(self, choice: BaseOp) -> None:
+        choice.layers["spconv2d"].weight = None
+
+    def _post_initialize_shared_weights(self) -> None:
+        nn.init.kaiming_normal_(self.weight_spconv2d, mode="fan_out")
+
+    def set_weights(
+        self,
+        weight_conv2d: torch.Tensor,
+        weight_fc1: torch.Tensor,
+        weight_fc2: torch.Tensor,
+        weight_spconv2d: torch.Tensor
+    ) -> None:
+        if self.weight_spconv2d.size() != weight_spconv2d.size():
+            raise Exception(
+                f"spconv2d: missmatch of dimensions: {self.weight_spconv2d.size()} != {weight_spconv2d.size()}"
+            )
+
+        self._set_weights_common(weight_conv2d, weight_fc1, weight_fc2)
+
+        with torch.no_grad():
+            self.weight_spconv2d.copy_(weight_spconv2d)
 
 
 class MBConv2dChoiceOp(BaseChoiceOp):
@@ -284,29 +415,8 @@ class MBConv2dChoiceOp(BaseChoiceOp):
     A concrete instance of a ``BaseChoiceOp`` which contains ``MBConv2dOp`` of
     the MnasNet search space.
     """
-    def _build_op(
-        self,
-        in_channels: int,
-        out_channels: int,
-        se_ratio: float,
-        skip_op: SkipOp,
-        kernel_size: int,
-        stride: int,
-        expansion_ratio: int,
-        norm_layer: Callable[..., nn.Module] | None = nn.BatchNorm2d,
-        activation_layer: Callable[..., nn.Module] | None = nn.ReLU6
-    ) -> BaseOp:
-        return MBConv2dOp(
-            in_channels,
-            out_channels,
-            expansion_ratio,
-            se_ratio,
-            skip_op,
-            kernel_size,
-            stride,
-            norm_layer,
-            activation_layer
-        )
+    weight_expand: nn.Parameter
+    weight_spconv2d: nn.Parameter
 
     def _make_shared(
         self,
@@ -314,15 +424,115 @@ class MBConv2dChoiceOp(BaseChoiceOp):
         max_out_channels: int,
         max_kernel_size: int,
         max_extension_ratio: int
-    ) -> torch.Tensor:
+    ) -> None:
         hidden = int(round(max_in_channels * max_extension_ratio))
 
-        return torch.Tensor(
-            hidden,
-            1,
-            max_kernel_size,
-            max_kernel_size
+        self.weight_expand = nn.Parameter(
+            torch.Tensor(
+                hidden,
+                max_in_channels,
+                1, 1
+            )
         )
+
+        self.weight_conv2d = nn.Parameter(
+            torch.Tensor(
+                hidden,
+                1,
+                max_kernel_size,
+                max_kernel_size
+            )
+        )
+
+        squeeze_channels = max(1, int(hidden * max(SE_CHOICES)))
+
+        self.weight_fc1 = nn.Parameter(
+            torch.Tensor(
+                squeeze_channels,
+                hidden,
+                1, 1
+            )
+        )
+
+        self.weight_fc2 = nn.Parameter(
+            torch.Tensor(
+                hidden,
+                squeeze_channels,
+                1, 1
+            )
+        )
+
+        self.weight_spconv2d = nn.Parameter(
+            torch.Tensor(
+                max_out_channels,
+                hidden,
+                1, 1
+            )
+        )
+
+    def _make_choices(
+        self,
+        range_in_channels: Iterable[int],
+        range_out_channels: Iterable[int],
+        range_expansion_ratios: Iterable[int],
+        stride: int,
+        norm_layer: Callable[..., nn.Module] | None = nn.BatchNorm2d,
+        activation_layer: Callable[..., nn.Module] | None = nn.ReLU6
+    ) -> list[MBConv2dOp]:
+        choices: list[MBConv2dOp] = []
+
+        for i in range_in_channels:
+            for j in range_out_channels:
+                for e in range_expansion_ratios:
+                    for k, se, skip in _permutations():
+                        choice = MBConv2dOp(
+                            i, j, e, se, skip, k, stride, norm_layer, activation_layer
+                        )
+                        self._unset_weight(choice)
+
+                        choices.append(choice)
+
+        return choices
+
+    def _post_set_weight(self, choice: BaseOp) -> None:
+        if "expand" in choice.layers:
+            _share_weight_conv2d(choice.layers["expand"][0], self.weight_expand)
+
+        _share_weight_conv2d(choice.layers["spconv2d"], self.weight_spconv2d)
+
+    def _post_unset_weight(self, choice: BaseOp) -> None:
+        if "expand" in choice.layers:
+            choice.layers["expand"][0].weight = None
+
+        choice.layers["spconv2d"].weight = None
+
+    def _post_initialize_shared_weights(self) -> None:
+        nn.init.kaiming_normal_(self.weight_expand, mode="fan_out")
+        nn.init.kaiming_normal_(self.weight_spconv2d, mode="fan_out")
+
+    def set_weights(
+        self,
+        weight_expand: torch.Tensor,
+        weight_conv2d: torch.Tensor,
+        weight_fc1: torch.Tensor,
+        weight_fc2: torch.Tensor,
+        weight_spconv2d: torch.Tensor
+    ) -> None:
+        if self.weight_expand.size() != weight_expand.size():
+            raise Exception(
+                f"expand: missmatch of dimensions: {self.weight_expand.size()} != {weight_expand.size()}"
+            )
+
+        if self.weight_spconv2d.size() != weight_spconv2d.size():
+            raise Exception(
+                f"spconv2d: missmatch of dimensions: {self.weight_spconv2d.size()} != {weight_spconv2d.size()}"
+            )
+
+        self._set_weights_common(weight_conv2d, weight_fc1, weight_fc2)
+
+        with torch.no_grad():
+            self.weight_expand.copy_(weight_expand)
+            self.weight_spconv2d.copy_(weight_spconv2d)
 
 
 class BaseBlock(ABC, nn.Module):
@@ -604,29 +814,8 @@ class LastConvChoiceOp(nn.Module):
         self.in_channels = range_in_channels
         self.out_channels = [out_channels]
 
-    def _share_weight(self, choice: Conv2dNormActivation) -> None:
-        _, _, shared_h, shared_w = self.weight.size()
-
-        shared_hc = int((shared_h - 1) / 2)
-        shared_wc = int((shared_w - 1) / 2)
-
-        conv2d: nn.Conv2d = choice[0]
-
-        c_out, c_in = conv2d.out_channels, conv2d.in_channels
-        h, w = conv2d.kernel_size
-
-        hc = int((h - 1) / 2)
-        wc = int((w - 1) / 2)
-
-        h_start = shared_hc - hc
-        h_end = shared_hc + hc + 1
-
-        w_start = shared_wc - wc
-        w_end = shared_wc + wc + 1
-
-        conv2d.weight = nn.Parameter(
-            self.weight[:c_out, :c_in, h_start:h_end, w_start:w_end]
-        )
+    def _set_weight(self, choice: Conv2dNormActivation) -> None:
+        _share_weight_conv2d(choice[0], self.weight)
 
     def set(self, in_channels: int) -> None:
         self.active = None
@@ -647,7 +836,7 @@ class LastConvChoiceOp(nn.Module):
         if self.active is None:
             raise Exception("no choice was selected")
 
-        self._share_weight(self.active)
+        self._set_weight(self.active)
         output = self.active(inputs)
         self.active[0].weight = None
 

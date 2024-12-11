@@ -506,8 +506,8 @@ def crossover(p1: OneShotNet, p2: OneShotNet) -> OneShotNet:
 
 def mutate(oneshot: OneShotNet, p: float) -> OneShotNet:
     """
-    Mutate the weights of the conv2ds of the seven blocks. For each weights if
-    the threshold ``p`` is passed add gaussian noise with std = 0.1.
+    Mutate the weights of the conv2d and linear layers. For each weights if the
+    threshold ``p`` is passed add gaussian noise with std = 0.1.
 
     Args:
         oneshot (OneShotNet):
@@ -519,24 +519,38 @@ def mutate(oneshot: OneShotNet, p: float) -> OneShotNet:
         OneShotNet:
             The mutated net.
     """
+    # Helper to mutate only Linear and Conv2d.
+    def maybe_mutate(m: nn.Module) -> None:
+        if isinstance(m, (nn.Linear, nn.Conv2d)) and torch.rand(1).item() < p:
+            with torch.no_grad():
+                m.weight += torch.rand_like(m.weight) * 0.1
+
+    first = deepcopy(oneshot.first)
+    for m in first.modules():
+        maybe_mutate(m)
+
     blocks: list[BaseOp] = []
     for block in oneshot.blocks:
         block = deepcopy(block)
 
-        if torch.rand(1).item() < p:
-            block = cast(BaseOp, block)
-
-            with torch.no_grad():
-                block[Layer.CONV2D][0].weight += \
-                    torch.rand_like(block[Layer.CONV2D][0].weight) * 0.1
+        for m in block.modules():
+            maybe_mutate(m)
 
         blocks.append(block)
 
+    last = deepcopy(oneshot.last)
+    for m in last.modules():
+        maybe_mutate(m)
+
+    classifier = deepcopy(oneshot.classifier)
+    for m in classifier.modules():
+        maybe_mutate(m)
+
     return OneShotNet(
-        oneshot.first,
+        first,
         blocks,
-        oneshot.last,
+        last,
         oneshot.pool,
-        oneshot.classifier,
+        classifier,
         oneshot._block_lengths
     )

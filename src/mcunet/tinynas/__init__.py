@@ -20,6 +20,7 @@ from .oneshot import (
     OneShotNet,
     SuperNet
 )
+from .mobilenet import MobileSkeletonNet
 from .datasets import CustomDataset
 from .utils import EDF
 from .utils.torchhelper import get_device, test
@@ -38,22 +39,15 @@ class SampleManager():
     _spaces: list[SearchSpace]
     _classes: int
     _models: list[list[searchspace.Model]] | None
-    _flops: list[list[int]] | None
+    _measurements: list[list[tuple[Any, ...]]] | None
     _edfs: list[EDF] | None
     _index: tuple[int, int] | None
 
     def __init__(
         self,
         classes: int,
-        spaces: Iterable[SearchSpace] | Iterable[tuple[float, int]] | None = None
+        spaces: list[SearchSpace]
     ) -> None:
-        if spaces is None:
-            spaces = configurations()
-
-        spaces = list(spaces)
-        if isinstance(spaces[0], tuple):
-            spaces = [SearchSpace(x, y) for x, y in spaces]
-
         self._spaces = spaces
         self._classes = classes
 
@@ -70,7 +64,7 @@ class SampleManager():
 
         Returns:
             list[EDF]:
-                A list of ``EDF`` objects.
+                A list of `EDF` objects.
         """
         self.update_edfs()
 
@@ -78,7 +72,7 @@ class SampleManager():
 
     def sample(self, m: int = 1000) -> None:
         """
-        Sample ``m`` models from the MnasNet search space per configuration. It
+        Sample `m` models from the MnasNet search space per configuration. It
         only generate architecture descriptions and not any Pytorch models.
 
         Args:
@@ -87,22 +81,32 @@ class SampleManager():
         """
         self._models = [list(islice(space, m)) for space in self._spaces]
 
-    def _append_flops(self, i: int, j: int) -> None:
+    def _append_measurement(
+        self,
+        fn: Callable[[MobileSkeletonNet, float, int], tuple[Any, ...]],
+        i: int,
+        j: int
+    ) -> None:
+        width_mult = self._spaces[i].width_mult
         resolution = self._spaces[i].resolution
         net = build_model(self._models[i][j], self._classes)
 
-        self._flops[i].append(net.flops(resolution, get_device()))
+        self._measurements[i].append(fn(net, resolution, width_mult))
 
-    def flops(self, batch: int | None = None) -> None:
+    def measure(
+        self,
+        fn: Callable[[MobileSkeletonNet, float, int], tuple[Any, ...]],
+        batch: int | None = None
+    ) -> None:
         """
-        Computes the FLOPs for the models generated via ``sample()``. This
+        Computes the FLOPs for the models generated via `sample()`. This
         method can be called several times until all models have their FLOPs
         computed.
 
         Args:
             batch (int, None):
                 The amount of models for which the FLOPs should be computed. If
-                ``None`` compute them for all models.
+                `None` compute them for all models.
         """
         if self._flops is None:
             self._flops = []
@@ -125,7 +129,7 @@ class SampleManager():
             self._flops.append([])
 
         for j in range(idx1, min(move, n_samples)):
-            self._append_flops(idx0, j)
+            self._append_measurement(fn, idx0, j)
 
         if move < n_samples:
             self._index = (idx0, move)
@@ -140,14 +144,14 @@ class SampleManager():
                 self._flops.append([])
 
             for j in range(n_samples):
-                self._append_flops(i, j)
+                self._append_measurement(fn, i, j)
 
         idx0 = n_full
         n_remain = batch % n_samples
         if n_remain > 0:
             self._flops.append([])
         for j in range(n_remain):
-            self._append_flops(idx0, j)
+            self._append_measurement(fn, idx0, j)
 
         self._index = (idx0, n_remain)
 
@@ -168,7 +172,7 @@ class SampleManager():
 
     def to_dict(self) -> dict[str, Any]:
         """
-        Converts this instance of ``SampleManager`` to a ``dict``. This can
+        Converts this instance of `SampleManager` to a `dict`. This can
         then be used to save and reload this instance for later use. This way
         the operations on the sampled models can be paused and later resumed.
 
@@ -185,7 +189,7 @@ class SampleManager():
                 }
                 for space, lm in zip(self._spaces, self._models)
             ],
-            "flops": self._flops,
+            "measurements": self._measurements,
             "index": self._index
         }
 

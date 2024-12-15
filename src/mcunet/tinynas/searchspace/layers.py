@@ -12,7 +12,7 @@ from torchvision.ops import Conv2dNormActivation, SqueezeExcitation
 __all__ = ["Layer", "BaseOp", "Conv2dOp", "DWConv2d", "BDWRConv2d"]
 
 
-class Layer(StrEnum):
+class LayerName(StrEnum):
     """
     Names for the different layers in the supported operations. Used to retrieve
     them.
@@ -38,7 +38,7 @@ def _add_se(
 
     layers.append(
         (
-            Layer.SE,
+            LayerName.SE,
             SqueezeExcitation(in_channels, squeeze_channels, activation_layer)
         )
     )
@@ -77,8 +77,11 @@ class BaseOp(ABC, nn.Module):
         self.se_ratio = se_ratio
         self.skip = skip
 
-    def __getitem__(self, key: Layer) -> nn.Module:
+    def __getitem__(self, key: LayerName) -> nn.Module:
         return self.layers[key]
+
+    def __contains__(self, key: LayerName) -> bool:
+        return key in self.layers
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
         outputs = inputs
@@ -109,7 +112,7 @@ class Conv2dOp(BaseOp):
 
         layers: list[tuple[str, nn.Module]] = [
             (
-                Layer.CONV2D,
+                LayerName.CONV2D,
                 Conv2dNormActivation(
                     in_channels,
                     out_channels,
@@ -145,7 +148,7 @@ class DWConv2dOp(BaseOp):
 
         layers: list[tuple[str, nn.Module]] = [
             (
-                Layer.CONV2D,
+                LayerName.CONV2D,
                 Conv2dNormActivation(
                     in_channels,
                     in_channels,
@@ -167,7 +170,7 @@ class DWConv2dOp(BaseOp):
 
         layers.append(
             (
-                Layer.PWCONV2D,
+                LayerName.PWCONV2D,
                 nn.Sequential(
                     nn.Conv2d(
                         in_channels,
@@ -208,7 +211,7 @@ class BDWRConv2dOp(BaseOp):
         if expansion_ratio > 1:
             layers.append(
                 (
-                    Layer.EXPANSION,
+                    LayerName.EXPANSION,
                     Conv2dNormActivation(
                         in_channels,
                         hidden,
@@ -222,7 +225,7 @@ class BDWRConv2dOp(BaseOp):
 
         layers.append(
             (
-                Layer.CONV2D,
+                LayerName.CONV2D,
                 Conv2dNormActivation(
                     hidden,
                     hidden,
@@ -240,7 +243,7 @@ class BDWRConv2dOp(BaseOp):
 
         layers.append(
             (
-                Layer.PWCONV2D,
+                LayerName.PWCONV2D,
                 nn.Sequential(
                     nn.Conv2d(
                         hidden,

@@ -1,7 +1,9 @@
 from enum import IntEnum
-from typing_extensions import Doc
-from typing import Any, Annotated, Final
 from operator import itemgetter
+from typing_extensions import Doc
+from abc import ABC, abstractmethod
+from collections.abc import Iterator
+from typing import Any, Annotated, Final
 from dataclasses import dataclass, asdict
 
 import numpy as np
@@ -30,7 +32,8 @@ The MnasNet paper can be found [here](https://openaccess.thecvf.com/content_CVPR
 __all__ = [
     "ConvOp", "CONV_CHOICES", "KERNEL_CHOICES", "SE_CHOICES",
     "SkipOp", "SKIP_CHOICES", "LAYER_CHOICES", "CHANNEL_CHOICES",
-    "Block", "sample_block", "Model", "sample_model", "uniform_model"
+    "Block", "sample_block", "Model", "sample_model", "uniform_model",
+    "SearchSpace"
 ]
 
 
@@ -59,9 +62,7 @@ CONV_CHOICES: Annotated[
         The possible choices for the convolution. Taken from the MnasNet paper.
         """
     )
-] = [
-    ConvOp.CONV2D, ConvOp.DWCONV2D, ConvOp.BDWRCONV2D
-]
+] = [ConvOp.CONV2D, ConvOp.DWCONV2D, ConvOp.BDWRCONV2D]
 
 KERNEL_CHOICES: Annotated[
     Final[list[int]],
@@ -142,69 +143,58 @@ EXPANSION_CHOICES: Annotated[
     )
 ] = [3, 4, 6]
 
+_width_step: Final[float] = 0.1
+WIDTH_CHOICES: Annotated[
+    Final[list[float]],
+    Doc(
+        """
+        The selected choices for the width multiplier from MCUNet.
+        """
+    )
+] = [0.2 + i * _width_step for i in range(9)]
+
+_resolution_step: Final[int] = 16
+RESOLUTION_CHOICES: Annotated[
+    Final[list[int]],
+    Doc(
+        """
+        The selected choices for the resolution from MCUNet.
+        """
+    )
+] = [48 + i * _resolution_step for i in range(12)]
+
+
+def configurations() -> Iterator[tuple[float, int]]:
+    """
+    Creates all 108 combinations of alpha (width multiplier) and rho (resolution)
+    as per the MCUNet paper.
+
+    Returns:
+        Iterator[tuple[float, int]]:
+            An iterator of all combinations.
+    """
+    for with_mult in WIDTH_CHOICES:
+        for resolution in RESOLUTION_CHOICES:
+            yield (with_mult, resolution)
+
 
 @dataclass(frozen=True)
-class Block():
-    n_layers: int
+class Layer():
+    op: ConvOp
+
     in_channels: int
     out_channels: int
-    first_stride: int  # Is only applied to the first layer of the block (see MobilenetV2).
-    expansion_ratio: int  # Only relevant when conv_op is ConvOp.MBCONV2D
+    stride: int
+    expansion_ratio: int
 
-    # Configuration of the layers.
-    conv_op: ConvOp
     kernel_size: int
     se_ratio: float
     skip_op: SkipOp
 
 
-def sample_block(
-    rng: np.random.Generator,
-    n_layers: int,
-    in_channels: int,
-    out_channels: int,
-    first_stride: int,
-    expansion_ratio: int
-) -> Block:
-    """
-    Randomly amples a single instance of a ``Block`` according to the
-    MnasNet search space.
-
-    Args:
-        rng (Generator):
-            A random number generator to uniformly distribute the blocks
-            parameters.
-        n_layers (int):
-            The number of layers.
-        in_channels (int):
-            The number of in channels.
-        out_channels (int):
-            The number of out channels.
-        first_stride (int):
-            The width of the stride for the first layer.
-        expansion_ratio (int):
-            Expand ratio for a mobile inverted bottleneck if choosen.
-
-    Returns:
-        Block:
-            The newly created block.
-    """
-    choice = rng.integers(0, len(CONV_CHOICES))
-    conv_op = CONV_CHOICES[choice]
-
-    choice = rng.integers(0, len(KERNEL_CHOICES))
-    kernel_size = KERNEL_CHOICES[choice]
-
-    choice = rng.integers(0, len(SE_CHOICES))
-    se_ratio = SE_CHOICES[choice]
-
-    choice = rng.integers(0, len(SKIP_CHOICES))
-    skip_op = SKIP_CHOICES[choice]
-
-    return Block(
-        n_layers, in_channels, out_channels, first_stride, expansion_ratio,
-        conv_op, kernel_size, se_ratio, skip_op
-    )
+@dataclass(frozen=True)
+class Block():
+    layers: list[Layer]
 
 
 @dataclass
@@ -219,137 +209,89 @@ class Model():
 
     def to_dict(self) -> dict[str, Any]:
         """
-        Converts a ``Model`` to a ``dict``.
+        Converts a `Model` to a `dict`.
 
         Returns:
             dict[str, Any]:
-                A ``dict`` containing the content of this model.
+                A `dict` containing the content of this model.
         """
         return asdict(self)
 
     @classmethod
     def from_dict(cls, config: dict[str, Any]) -> 'Model':
         """
-        Converts a ``dict`` to a ``Model``.
+        Converts a `dict` to a `Model`.
 
         Args:
             config (dict[str, Any]):
-                The ``dict`` containing the content of a model to be loaded.
+                The `dict` containing the content of a model to be loaded.
 
         Returns:
             Model:
-                The model constructed from the ``dict``.
+                The model constructed from the `dict`.
         """
 
-        blocks: list[Block] = []
-        for block_config in config["blocks"]:
-            n_layers, in_channels, out_channels, first_stride, expansion_ratio = \
-                itemgetter(
-                    "n_layers",
-                    "in_channels",
-                    "out_channels",
-                    "first_stride",
-                    "expansion_ratio"
-                )(block_config)
-
-            conv_op, kernel_size, se_ratio, skip_op = \
-                itemgetter(
-                    "conv_op", "kernel_size", "se_ratio", "skip_op"
-                )(block_config)
-
-            block = Block(
-                n_layers,
-                in_channels,
-                out_channels,
-                first_stride,
-                expansion_ratio,
-                conv_op,
-                kernel_size,
-                se_ratio,
-                skip_op
-            )
-
-            blocks.append(block)
+        blocks: list[Block] = [
+            Block([
+                Layer(**layer_config) for layer_config in block_config["layers"]
+            ]) for block_config in config["blocks"]
+        ]
 
         return cls(blocks, config["last_channels"])
 
 
-def sample_model(rng: np.random.Generator, width_mult: float = 1.0) -> Model:
-    """
-    Randomly samples a single instance of a ``Model`` according
-    to the MnasNet search space. The MnasNet search space makes use of the
-    MobileNetV2 layer settings and input and output channels. These settings
-    are used here.
-
-    Args:
-        rng (Generator):
-            A random number generator to uniformly distribute the models
-            parameters.
-        width_mult (float):
-            Modifies the input and output channels of the hidden layers.
-
-    Returns:
-        Model:
-            The newly created model.
-    """
-    blocks: list[Block] = []
-
-    round_nearest = 8
-
-    # As per MobileNetV2 architecture. Copied from
-    # https://github.com/pytorch/vision/blob/main/torchvision/models/mobilenetv2.py
-    in_channels = make_divisible(
-        FIRST_CONV_CHANNELS * width_mult, round_nearest
-    )
-
-    for _, c, _, s in LAYER_SETTINGS:
-        n_layers = LAYER_CHOICES[rng.integers(0, len(LAYER_CHOICES))]
-
-        choice = CHANNEL_CHOICES[rng.integers(0, len(CHANNEL_CHOICES))]
-        out_channels = make_divisible(
-            c * choice * width_mult, round_nearest
-        )
-
-        expansion_ratio = EXPANSION_CHOICES[
-            rng.integers(0, len(EXPANSION_CHOICES))
-        ]
-
-        blocks.append(
-            sample_block(
-                rng,
-                n_layers,
-                in_channels,
-                out_channels,
-                s,
-                expansion_ratio
-            )
-        )
-
-        in_channels = out_channels
-
-    last_channels = make_divisible(
-        LAST_CONV_CHANNELS * max(1.0, width_mult), round_nearest
-    )
-
-    return Model(blocks, last_channels)
-
-
-def uniform_model(
-    conv_op: ConvOp,
+def uniform_layers(
+    op: ConvOp,
+    in_channels: int,
+    out_channels: int,
+    stride: int,
+    expansion_ratio: int,
     kernel_size: int,
     se_ratio: float,
     skip_op: SkipOp,
-    n_layers: int,
+    depth: int
+) -> list[Layer]:
+    return [
+        Layer(
+            op,
+            in_channels,
+            out_channels,
+            stride,
+            expansion_ratio,
+            kernel_size,
+            se_ratio,
+            skip_op
+        )
+    ] + [
+        Layer(
+            op,
+            out_channels,
+            out_channels,
+            1,
+            expansion_ratio,
+            kernel_size,
+            se_ratio,
+            skip_op
+        ) for _ in range(depth - 1)
+    ]
+
+
+def uniform_model(
+    op: ConvOp,
+    kernel_size: int,
+    se_ratio: float,
+    skip_op: SkipOp,
+    depth: int,
     channel_mult: float,
     expansion_ratio: int,
     width_mult: float = 1.0
 ) -> Model:
     """
-    Sample a ``Model`` from the search space, where every ``Block`` has the same
+    Sample a `Model` from the search space, where every `Block` has the same
     configuration.
 
     Args:
-        conv_op (ConvOp):
+        op (ConvOp):
             The convolution operation for all blocks to use.
         kernel_size (int):
             The kernel size for the convolution operation.
@@ -357,7 +299,7 @@ def uniform_model(
             The squeeze-and-excitation ratio.
         skip_op (SkipOp):
             The skip operation per block.
-        n_layers (int):
+        depth (int):
             The amount of layers foar all blocks.
         channel_mult (float):
             The additionel multiplier for th e amount of channels.
@@ -372,6 +314,9 @@ def uniform_model(
     """
     blocks: list[Block] = []
 
+    if op != ConvOp.BDWRCONV2D:
+        expansion_ratio = 1
+
     round_nearest = 8
     in_channels = make_divisible(
         FIRST_CONV_CHANNELS * width_mult, round_nearest
@@ -382,19 +327,19 @@ def uniform_model(
             c * channel_mult * width_mult, round_nearest
         )
 
-        blocks.append(
-            Block(
-                n_layers,
-                in_channels,
-                out_channels,
-                s,
-                expansion_ratio,
-                conv_op,
-                kernel_size,
-                se_ratio,
-                skip_op
-            )
+        layers = uniform_layers(
+            op,
+            in_channels,
+            out_channels,
+            s,
+            expansion_ratio,
+            kernel_size,
+            se_ratio,
+            skip_op,
+            depth
         )
+
+        blocks.append(Block(layers))
 
         in_channels = out_channels
 
@@ -403,3 +348,70 @@ def uniform_model(
     )
 
     return Model(blocks, last_channels)
+
+
+class SearchSpace(ABC):
+    """
+    Represents a search space with a given width multiplier and resolution. It
+    implements the `Iterator` pattern to randomly sample models.
+    """
+    width_mult: float
+    resolution: int
+
+    _rng: np.random.Generator | None
+
+    def __init__(self, width_mult: float, resolution: int) -> None:
+        self.width_mult = width_mult
+        self.resolution = resolution
+
+        self._rng = None
+
+    def oneshot(self) -> Model:
+        """
+        Samples one model from the search space. Meant to be used in a oneshot
+        way, where only one model is needed.
+
+        Returns:
+            Model:
+                A randomly sampled model from the MnasNet searchspace.
+        """
+        rng = np.random.default_rng()
+        return self.sample_model(rng)
+
+    def __iter__(self) -> 'SearchSpace':
+        if self._rng is None:
+            self._rng = np.random.default_rng()
+
+        return self
+
+    def __next__(self) -> Model:
+        if self._rng is None:
+            raise StopIteration()
+
+        return self.sample_model(self._rng)
+
+    @abstractmethod
+    def sample_model(self, rng: np.random.Generator) -> Model:
+        """
+        Sample a single model from the search space.
+
+        Args:
+            rng (numpy.random.Generator):
+                A random number generator.
+
+        Returns:
+            Model:
+                The sampled model.
+        """
+        pass
+
+    @abstractmethod
+    def max_models(self) -> tuple[Model, ...]:
+        """
+        Build the maximum model(s) in this search space.
+
+        Returns:
+            tuple[Model, ...]:
+                All the maximum models.
+        """
+        pass

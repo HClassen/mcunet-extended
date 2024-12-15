@@ -77,7 +77,7 @@ def build_model(
     activation_layer: Callable[..., nn.Module] | None = nn.ReLU6
 ) -> MobileSkeletonNet:
     """
-    Build a ``MobileSkeletonNet`` from a given ``Model``.
+    Build a `MobileSkeletonNet` from a given `Model`.
 
     Args:
         model (Model):
@@ -86,45 +86,42 @@ def build_model(
             The amout of classes for the classifier to recognize.
         dropout (float):
             The percentage of dropout used in the classifier.
-        norm_layer (Callable[..., nn.Module], None):
+        norm_layer (Callable[..., torch.nn.Module], None):
             The constructor for the norm layer.
-        activation_layer (Callable[..., nn.Module], None):
+        activation_layer (Callable[..., torch.nn.Module], None):
             The constructor for the activation layer.
 
     Returns:
         MobileSkeletonNet:
             The created Pytorch model.
     """
-    in_channels = model.blocks[0].in_channels
-
+    in_channels = model.blocks[0].layers[0].in_channels
     first = build_first(in_channels, norm_layer, activation_layer)
 
     blocks: list[BaseOp] = []
     for block in model.blocks:
-        for i in range(block.n_layers):
+        for layer in block.layers:
             # The behavior of the first layer of a block is a bit different
             # than on the following blocks. It translates from block.in_channels
             # to block.out_channels and has a stride potentially different
             # than 1.
-            stride = block.first_stride if i == 0 else 1
 
             blocks.append(
                 _build_op(
-                    block.conv_op,
-                    in_channels,
-                    block.out_channels,
-                    block.expansion_ratio,
-                    block.se_ratio,
-                    block.skip_op,
-                    block.kernel_size,
-                    stride,
+                    layer.op,
+                    layer.in_channels,
+                    layer.out_channels,
+                    layer.expansion_ratio,
+                    layer.se_ratio,
+                    layer.skip_op,
+                    layer.kernel_size,
+                    layer.stride,
                     norm_layer,
                     activation_layer
                 )
             )
 
-            in_channels = block.out_channels
-
+    in_channels = model.blocks[-1].layers[-1].out_channels
     last = build_last(
         in_channels, norm_layer=norm_layer, activation_layer=activation_layer
     )

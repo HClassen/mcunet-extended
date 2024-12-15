@@ -1,71 +1,58 @@
+import time
 from typing import cast
 from copy import deepcopy
 from collections.abc import Callable, Iterable, Iterator
 
 import torch
 import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import Dataset, DataLoader
 
 from torchvision.ops import Conv2dNormActivation
 
+from .. import SearchSpace
 from ..mobilenet import (
-    LAYER_SETTINGS,
     FIRST_CONV_CHANNELS,
     LAST_CONV_CHANNELS,
+    DROPOUT,
     build_first,
     build_pool,
     build_classifier,
     MobileSkeletonNet
 )
-from ..searchspace import (
-    LAYER_CHOICES,
-    CHANNEL_CHOICES,
-    EXPANSION_CHOICES,
-    ConvOp,
-    Block,
-    Model
-)
-from ..searchspace.layers import (
-    Layer,
-    BaseOp,
-    Conv2dOp,
-    DWConv2dOp,
-    BDWRConv2dOp
-)
-from ..utils import make_divisible
+from ..searchspace import uniform_layers, Block, Model
+from ..searchspace.layers import LayerName, BaseOp
+from ..searchspace.model import build_model
+from ..utils import make_divisible, make_caption
 
-from .layers import *
+from .helper import reduce_channels, base_op_to_conv_op
+from .customize import (
+    ChoiceBlock,
+    LastChoiceLayer,
+    WarmUpSetter,
+    LastChoiceLayerMaker,
+    ChoiceBlocksMaker
+)
 
 
 """
-# Single Path One-Shot Neural Architecture Search
+Single Path One-Shot Neural Architecture Search
 
-This subproject provides an implementation of the `SuperNet` for the modified
-MnasNet search space as well as the needed `crossover` and `mutate` functions
-needed for the evolution search.
+This subproject provides a base class for the super-network. Subclasses need to
+provide several methods to agment the behavior of the super-network for their
+needs. Additionally, several helper methods are provided as well as the needed
+`crossover` and `mutate` functions for the evolution search.
 
-The `SuperNet` and evolution functions are modeled after the paper with the title
-Single Path One-Shot Neural Architecture Search with Uniform Sampling paper.
+The `BaseSuperNet` and evolution functions are modeled after the paper "Single
+Path One-Shot Neural Architecture Search with Uniform Sampling".
 
-It can be found [here](https://arxiv.org/abs/1904.00420)
+It can be found: https://arxiv.org/abs/1904.00420
 """
 
 
 __all__ = [
     "OneShotNet", "SuperNet", "initial_population", "crossover", "mutate"
 ]
-
-
-def _get_conv_op(op: BaseOp) -> ConvOp:
-    if isinstance(op, Conv2dOp):
-        return ConvOp.CONV2D
-
-    if isinstance(op, DWConv2dOp):
-        return ConvOp.DWCONV2D
-
-    if isinstance(op, BDWRConv2dOp):
-        return ConvOp.BDWRCONV2D
-
-    raise ValueError(f"unknown convolution operation: {type(op)}")
 
 
 class OneShotNet(MobileSkeletonNet):
@@ -86,7 +73,7 @@ class OneShotNet(MobileSkeletonNet):
 
     def to_model(self) -> Model:
         """
-        Build a ``Model`` from this ``OneShotNet``.
+        Build a `Model` from this `OneShotNet`.
 
         Returns:
             Model:
@@ -103,14 +90,17 @@ class OneShotNet(MobileSkeletonNet):
         for block, length in zip(firsts, self._block_lengths):
             blocks.append(
                 Block(
-                    length,
-                    block.in_channels,
-                    block.out_channels,
-                    block[Layer.CONV2D][0].stride,
-                    block.expansion_ratio,
-                    _get_conv_op(block),
-                    block[Layer.CONV2D][0].kernel_size,
-                    block.se_ratio, block.skip
+                    uniform_layers(
+                        base_op_to_conv_op(block),
+                        block.in_channels,
+                        block.out_channels,
+                        block[LayerName.CONV2D][0].stride,
+                        block.expansion_ratio,
+                        block[LayerName.CONV2D][0].kernel_size,
+                        block.se_ratio,
+                        block.skip,
+                        length
+                    )
                 )
             )
 
@@ -119,103 +109,243 @@ class OneShotNet(MobileSkeletonNet):
 
 class SuperNet(MobileSkeletonNet):
     first: Conv2dNormActivation
-    last: LastConvChoiceOp
+    blocks: list[ChoiceBlock]
+    last: LastChoiceLayer
+
+    _warm_up_setter: WarmUpSetter
 
     def __init__(
         self,
+        blocks_maker: ChoiceBlocksMaker,
+        last_maker: LastChoiceLayerMaker,
+        warm_up_setter: WarmUpSetter,
         classes: int,
         width_mult: float,
-        dropout: float = 0.2,
+        dropout: float = DROPOUT,
         norm_layer: Callable[..., nn.Module] | None = nn.BatchNorm2d,
-        activation_layer: Callable[..., nn.Module] | None = nn.ReLU6
+        activation_layer: Callable[..., nn.Module] | None = nn.ReLU6,
+        initialize_weights: bool = True
     ) -> None:
+        self._warm_up_setter = warm_up_setter
+
         round_nearest = 8
-        in_channels = [make_divisible(
-            FIRST_CONV_CHANNELS * width_mult, round_nearest
-        )]
+        in_channels = (
+            make_divisible(FIRST_CONV_CHANNELS * width_mult, round_nearest),
+        )
 
         # Build the first conv2d layer.
         first = build_first(in_channels[0], norm_layer, activation_layer)
 
         # Build the 7 blocks.
-        blocks: list[SuperBlock] = []
-
-        depth = max(LAYER_CHOICES)
-        for _, c, _, s in LAYER_SETTINGS:
-            out_channels = set([
-                make_divisible(c * choice * width_mult, round_nearest)
-                for choice in CHANNEL_CHOICES
-            ])
-
-            conv2d = Conv2dBlock(
-                in_channels,
-                out_channels, [1], depth, s,
-                norm_layer=norm_layer,
-                activation_layer=activation_layer
-            )
-
-            dwconv2d = DWConv2dBlock(
-                in_channels,
-                out_channels, [1], depth, s,
-                norm_layer=norm_layer,
-                activation_layer=activation_layer
-            )
-
-            bdwrconv2d = BDWRConv2dBlock(
-                in_channels,
-                out_channels, EXPANSION_CHOICES, depth, s,
-                norm_layer=norm_layer,
-                activation_layer=activation_layer
-            )
-
-            superblock = SuperBlock(conv2d, dwconv2d, bdwrconv2d)
-            blocks.append(superblock)
-
-            in_channels = superblock.out_channels
+        blocks, in_channels = blocks_maker.make(
+            in_channels, width_mult, round_nearest, norm_layer, activation_layer
+        )
 
         # Build the last conv2d layer.
         last_out = make_divisible(
             LAST_CONV_CHANNELS * max(1.0, width_mult), round_nearest
         )
 
-        last = LastConvChoiceOp(
+        last = last_maker.make(
             in_channels, last_out, norm_layer, activation_layer
         )
 
         pool = build_pool()
         classifier = build_classifier(classes, last_out, dropout)
 
-        super().__init__(first, blocks, last, pool, classifier)
+        super().__init__(
+            first, blocks, last, pool, classifier, initialize_weights
+        )
 
     def _weight_initialization(self) -> None:
-        super()._weight_initialization()
+        nn.init.kaiming_normal_(self.first[0].weight, mode="fan_out")
+        nn.init.ones_(self.first[1].weight)
+        nn.init.zeros_(self.first[1].bias)
 
-        for m in self.blocks.modules():
-            if isinstance(m, BaseChoiceOp):
-                nn.init.kaiming_normal_(m.weight, mode="fan_out")
+        for block in self.blocks:
+            block._weight_initialization()
 
-        nn.init.kaiming_normal_(self.last.weight, mode="fan_out")
+        self.last.sharer._weight_initialization()
+
+        nn.init.normal_(self.classifier[1].weight, 0, 0.01)
+        nn.init.zeros_(self.classifier[1].bias)
+
+    def run_warm_up(
+        self,
+        space: SearchSpace,
+        ds: Dataset,
+        epochs: int,
+        batch_size: int,
+        *,
+        batches: int | None = None,
+        device=None
+    ) -> None:
+        """
+        Warm up the super-network by training the maximum model(s) from the
+        search space. Set the weights of the super-netowrk to the trained
+        weights from the maximum model(s).
+
+        Args:
+            space (SearchSpace):
+                The search space to get the maximum models.
+            ds (Dataset):
+                The data set to train on.
+            epochs (int):
+                The number of training epochs.
+            batch_size (int):
+                The number of samples per batch.
+            batches (int, None):
+                The number of batches per epoch. If set to ``None`` use the whole
+                training data set.
+        """
+        warm_up_start = time.time()
+
+        self._warm_up_setter.before(self, device)
+
+        print(make_caption("Warm Up", 70, " "))
+        for i, max_model in enumerate(space.max_models()):
+            net = build_model(max_model, self.classifier[-1].weight.shape[0])
+
+            net.run_train(
+                ds, epochs, batch_size, 0.9, 5e-5, batches=batches, device=device
+            )
+
+            print(make_caption(f"Set Parameters({i + 1})", 70, "-"))
+
+            set_start = time.time()
+            self._warm_up_setter.set(self, max_model, net)
+            set_time = time.time() - set_start
+
+            print(f"time={set_time:.2f}s\n")
+
+        self._warm_up_setter.after(self)
+
+        warm_up_time = time.time() - warm_up_start
+        print(f"\ntotal={warm_up_time:.2f}s\n")
+
+    def run_train(
+        self,
+        space: SearchSpace,
+        ds: Dataset,
+        initial_lr: float,
+        epochs: int,
+        batch_size: int,
+        models_per_batch: int,
+        *,
+        batches: int | None = None,
+        device=None
+    ) -> None:
+        """
+        Train the super-network by sampling random models per batch of training
+        data, setting the super-network to the sampled model and performing the
+        backward pass.
+
+        Args:
+            space (SearchSpace):
+                The search space from which to sample the models.
+            ds (Dataset):
+                The data set to train on.
+            initial_lr (float):
+                The initial learning rate for cosine annealing learning.
+            epochs (int):
+                The number of training epochs.
+            batch_size (int):
+                The number of samples per batch.
+            models_per_batch (int):
+                The number of models sampled per batch.
+            batches (int, None):
+                The number of batches per epoch. If set to ``None`` use the whole
+                training data set.
+        """
+        train_start = time.time()
+
+        models = iter(space)
+        dl = DataLoader(ds, batch_size, shuffle=True)
+        batches = batches if batches is not None else len(dl)
+
+        self.to(device)
+        criterion = nn.CrossEntropyLoss()
+        optimizer = torch.optim.SGD(self.parameters(), lr=initial_lr)
+
+        scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(
+            optimizer, 256
+        )
+
+        print(make_caption("Training", 70, " "))
+        self.train()
+        for i in range(epochs):
+            print(make_caption(f"Epoch {i + 1}/{epochs}", 70, "-"))
+
+            epoch_start = time.time()
+
+            for k, (images, labels) in enumerate(dl):
+                lr = scheduler.get_last_lr()[0]
+                print(f"epoch={i + 1}, batch={k + 1:0{len(str(batches))}}/{batches}, lr={lr:.05f}", end="")
+
+                batch_start = time.time()
+
+                images = images.to(device)
+                labels = labels.to(device)
+
+                for _ in range(models_per_batch):
+                    model = next(models)
+                    self.set(model)
+
+                    outputs = self(images)
+                    loss = criterion(outputs, labels)
+
+                    optimizer.zero_grad()
+
+                    loss.backward()
+                    optimizer.step()
+
+                scheduler.step()
+
+                batch_time = time.time() - batch_start
+
+                print(f", time={batch_time:.2f}s")
+
+                if batches == k + 1:
+                    break
+
+            epoch_time = time.time() - epoch_start
+            print(f"\ntime={epoch_time:.2f}s\n")
+
+        train_time = time.time() - train_start
+        print(f"\ntotal={train_time:.2f}s\n")
 
     def set(self, model: Model) -> None:
+        """
+        Set the super-network to a sample from the search space.
+
+        Args:
+            model (Model):
+                The sampled model from the search space.
+
+        Raises:
+            Exception:
+                If `model` does not match the choices available in the
+                super-network.
+        """
         if len(self.blocks) != len(model.blocks):
             raise Exception(f"invalid blocks length {len(model.blocks)}")
 
-        for superblock, block in zip(self.blocks, model.blocks):
-            superblock = cast(SuperBlock, superblock)
+        for choice_block, model_block in zip(self.blocks, model.blocks):
+            choice_block = cast(ChoiceBlock, choice_block)
 
-            superblock.set(block)
+            choice_block.set(model_block)
 
-        self.last.set(model.blocks[-1].out_channels)
+        self.last.set(model.blocks[-1].layers[-1].out_channels)
 
     def get(self, copy: bool = False) -> OneShotNet:
         """
         Collects the current active operations in a single net. A call to
-        ``set`` is requiered beforehand.
+        `set` is requiered beforehand.
 
         Args:
             copy (bool):
-                If ``True`` perform a deepcopy on all operations specific to
-                the current active operations.
+                If `True` perform a deepcopy on all operations specific to the
+                current active operations.
 
         Returns:
             OneShotNet:
@@ -224,44 +354,21 @@ class SuperNet(MobileSkeletonNet):
         blocks: list[nn.Module] = []
         block_lengths: list[int] = []
 
-        for superblock in self.blocks:
-            superblock = cast(SuperBlock, superblock)
+        for block in self.blocks:
+            block = cast(ChoiceBlock, block)
 
-            if superblock.active is None:
-                raise Exception("no choice was selected")
+            layers = block.get(copy)
+            block_lengths.append(len(layers))
+            blocks.extend(layers)
 
-            active = superblock.active
-            if active.n_layers is None:
-                raise Exception("no choice was selected")
-
-            block_lengths.append(active.n_layers)
-
-            for i in range(active.n_layers):
-                layer = cast(BaseChoiceOp, active.layers[i])
-
-                if layer.active is None:
-                    raise Exception("no choice was selected")
-
-                layer._share_weight(layer.active)
-
-                blocks.append(layer.active)
-
-        if self.last.active is None:
-            raise Exception("no choice was selected")
-
-        self.last._share_weight(self.last.active)
-        last = self.last.active
-
-        if copy:
-            blocks = deepcopy(blocks)
-            last = deepcopy(last)
+        last = self.last.get(copy)
 
         return OneShotNet(
-            self.first,
+            self.first if not copy else deepcopy(self.first),
             blocks,
             last,
             self.pool,
-            self.classifier,
+            self.classifier if not copy else deepcopy(self.classifier),
             block_lengths
         )
 
@@ -281,7 +388,7 @@ def initial_population(
         size (int):
             The initial population size.
         supernet (SuperNet):
-            A (pre trained) instance of ``SuperNet`` to get the actual NNs from.
+            A (pre trained) instance of `SuperNet` to get the actual NNs from.
         fitness (Callable[[Model], bool]):
             A function to evaluate the fitness of a model for some criterion.
 
@@ -303,147 +410,23 @@ def initial_population(
     return population
 
 
-def _copy_batchnorm(
-    new: nn.BatchNorm2d, old: nn.BatchNorm2d, c_out: int
-) -> None:
-    new.weight = nn.Parameter(old.weight[:c_out])
-    new.bias = nn.Parameter(old.bias[:c_out])
-    new.running_mean = old.running_mean[:c_out]
-    new.running_var = old.running_var[:c_out]
-
-
-def _copy_conv2d(
-    new: Conv2dNormActivation, old: Conv2dNormActivation, c_in: int, c_out: int
-) -> None:
-    new[0].weight = nn.Parameter(old[0].weight[:c_out, :c_in])
-    _copy_batchnorm(new[1], old[1], c_out)
-
-
-def _copy_squeeze(
-    new: nn.Conv2d, old: nn.Conv2d, c_in: int, c_out: int
-) -> None:
-    new.weight = nn.Parameter(old.weight[:c_out, :c_in])
-    new.bias = nn.Parameter(old.bias[:c_out])
-
-
-def _reduce_channels(op: BaseOp, in_channels: int, out_channels: int) -> BaseOp:
-    expansion_ratio = op.expansion_ratio
-    se_ratio = op.se_ratio
-    skip = op.skip
-    kernel_size = op[Layer.CONV2D][0].kernel_size
-    stride = op[Layer.CONV2D][0].stride
-
-    reduced = None
-    squeeze = None
-
-    if isinstance(op, Conv2dOp):
-        reduced = Conv2dOp(
-            in_channels,
-            out_channels,
-            se_ratio,
-            skip,
-            kernel_size,
-            stride,
-        )
-        squeeze = 1
-
-        _copy_conv2d(
-            reduced[Layer.CONV2D], op[Layer.CONV2D], in_channels, out_channels
-        )
-
-        in_channels = out_channels
-    elif isinstance(op, DWConv2dOp):
-        reduced = DWConv2dOp(
-            in_channels,
-            out_channels,
-            se_ratio,
-            skip,
-            kernel_size,
-            stride,
-        )
-        squeeze = 1
-
-        _copy_conv2d(
-            reduced[Layer.CONV2D], op[Layer.CONV2D], in_channels, in_channels
-        )
-
-        reduced[Layer.PWCONV2D][0].weight = nn.Parameter(
-            op[Layer.PWCONV2D][0].weight[:out_channels, :in_channels]
-        )
-        _copy_batchnorm(
-            reduced[Layer.PWCONV2D][1], op[Layer.PWCONV2D][1], out_channels
-        )
-    elif isinstance(op, BDWRConv2dOp):
-        reduced = BDWRConv2dOp(
-            in_channels,
-            out_channels,
-            expansion_ratio,
-            se_ratio,
-            skip,
-            kernel_size,
-            stride,
-        )
-        squeeze = 2 if expansion_ratio > 1 else 1
-
-        hidden = in_channels * expansion_ratio
-        if expansion_ratio > 1:
-            _copy_conv2d(
-                reduced[Layer.EXPANSION], op[Layer.EXPANSION], in_channels, hidden
-            )
-
-        _copy_conv2d(reduced[Layer.CONV2D], op[Layer.CONV2D], hidden, hidden)
-
-        reduced[Layer.PWCONV2D][0].weight = nn.Parameter(
-            op[Layer.PWCONV2D][0].weight[:out_channels, :hidden]
-        )
-        _copy_batchnorm(
-            reduced[Layer.PWCONV2D][1], op[Layer.PWCONV2D][1], out_channels
-        )
-
-        in_channels = hidden
-    else:
-        raise Exception(f"unknown operation {type(op)}")
-
-    if se_ratio > 0.0:
-        out, _, _, _ = reduced[Layer.SE].fc1.weight.size()
-
-        _copy_squeeze(
-            reduced[Layer.SE].fc1,
-            op[Layer.SE].fc1,
-            in_channels,
-            out
-        )
-
-        _copy_squeeze(
-            reduced[Layer.SE].fc2,
-            op[Layer.SE].fc2,
-            out,
-            in_channels
-        )
-
-    return reduced
-
-
 def crossover(p1: OneShotNet, p2: OneShotNet) -> OneShotNet:
     """
-    Performs single point crossover on ``p1`` and ``p1``. Randomly select a
-    split point ``s`` of the seven inner blocks. Then select the blocks ``0`` to
-    ``s`` from ``p1`` and merge them with the blocks ``s + 1`` to ``6`` from
-    ``p2`` to create the offspring model. ``s`` is chosen from [0, 5], so that
-    at least one block of a parent is part of the child.
+    Performs single point crossover on `p1` and `p1`. Randomly select a split
+    point `s` of the seven inner blocks. Then select the blocks `0` to `s` from
+    `p1` and merge them with the blocks `s + 1` to `6` from `p2` to create the
+    offspring model. `s` is chosen from [0, 5], so that at least one block of a
+    parent is part of the child.
 
-    To adjust for different ``out_channels`` of the last selected layer from
-    ``p1`` and ``in_channels`` of the first selected layer from ``p2`` take the
-    result of ``min(out_channels, in_channels)``. If ``out_channels`` is the
-    minimum then reduce ``in_channels`` to ``out_channels``. If ``in_channels``
-    is the minimum reduce the ``in_channels`` and ``out_channels`` of all layers
-    in the ``p1`` block to the minimum.
+    To adjust for different `out_channels` of the last selected layer from `p1`
+    and `in_channels` of the first selected layer from `p2` take the result of
+    `min(out_channels, in_channels)`. If `out_channels` is the minimum then
+    reduce `in_channels` to `out_channels`. If `in_channels` is the minimum
+    reduce the `in_channels` and `out_channels` of all layers in the `p1` block
+    to the minimum.
 
-    Also take the last conv2d layer of ``p2`` as it matches the out_channels of
-    the newly created seven blocks.
-
-    Since the first conv2d, pooling and classification are shared between
-    choices in the ``SuperNet`` just take them from ``p1``.
+    Take the first conv2d layer from `p1`. Take the last conv2d layer and
+    classification layer from `p1`.
 
     Args:
         p1 (OneShotNet):
@@ -453,7 +436,7 @@ def crossover(p1: OneShotNet, p2: OneShotNet) -> OneShotNet:
 
     Returns:
         OneShotNet:
-                The offspring model.
+            The offspring model.
     """
     split = torch.randint(0, 6, [1]).item()
 
@@ -471,35 +454,34 @@ def crossover(p1: OneShotNet, p2: OneShotNet) -> OneShotNet:
 
     if p1_out_channels < p2_in_channels:
         # Only need to adjust the in_channels of the first p2 layer.
-        p2_blocks[0] = _reduce_channels(
+        p2_blocks[0] = reduce_channels(
             p2_blocks[0], p1_out_channels, p2_blocks[0].out_channels
         )
     elif p2_in_channels < p1_out_channels:
         # All layers of the last p1 block need their out_channels adjusted.
         # For all but the first of this block also adjust the in_channels.
         start = sum(p1_split_lengths[:-1])
-        p1_blocks[start] = _reduce_channels(
+        p1_blocks[start] = reduce_channels(
             p1_blocks[start],
             p1_blocks[start].in_channels,
             p2_in_channels
         )
 
         for i in range(start + 1, p1_split):
-            p1_blocks[i] = _reduce_channels(
+            p1_blocks[i] = reduce_channels(
                 p1_blocks[i],
                 p2_in_channels,
                 p2_in_channels
             )
 
     blocks = p1_blocks + p2_blocks
-    last = deepcopy(p2.last)
 
     return OneShotNet(
-        p1.first,
+        deepcopy(p1.first),
         blocks,
-        last,
-        p1.pool,
-        p1.classifier,
+        deepcopy(p2.last),
+        p2.pool,
+        deepcopy(p2.classifier),
         p1_split_lengths + p2_split_lengths
     )
 
@@ -507,7 +489,7 @@ def crossover(p1: OneShotNet, p2: OneShotNet) -> OneShotNet:
 def mutate(oneshot: OneShotNet, p: float) -> OneShotNet:
     """
     Mutate the weights of the conv2d and linear layers. For each weights if the
-    threshold ``p`` is passed add gaussian noise with std = 0.1.
+    threshold `p` is passed add gaussian noise with std = 0.1.
 
     Args:
         oneshot (OneShotNet):

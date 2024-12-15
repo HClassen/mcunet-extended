@@ -1,115 +1,31 @@
 import time
 from itertools import islice
+from typing import Any, Final
 from bisect import insort_left
 from operator import itemgetter
-from typing import cast, Any, Final
-from collections.abc import Callable, Iterator, Iterable
+from collections.abc import Callable, Iterable
 
-import torch
 import torch.nn as nn
-import torch.linalg as la
 from torch.utils.data import Dataset, DataLoader, random_split
 
 import numpy as np
 
-from .searchspace import (
-    KERNEL_CHOICES,
-    SE_CHOICES,
-    LAYER_CHOICES,
-    CHANNEL_CHOICES,
-    EXPANSION_CHOICES,
-    sample_model,
-    uniform_model,
-    ConvOp,
-    SkipOp,
-    Model
-)
-from .searchspace.layers import Layer, BaseOp
+from .searchspace import configurations, Model, SearchSpace
 from .searchspace.model import build_model
 from .oneshot import (
     initial_population,
     crossover,
     mutate,
+    _make_caption,
     OneShotNet,
     SuperNet
 )
-from .oneshot.layers import SuperBlock, BaseChoiceOp
 from .datasets import CustomDataset
 from .utils import EDF
 from .utils.torchhelper import get_device, test
 
 
-__all__ = [
-    "WIDTH_CHOICES", "RESOLUTION_CHOICES",
-    "configurations",
-    "SearchSpace", "SampleManager"
-]
-
-
-# The selected choices for the width multiplier.
-_width_step = 0.1
-WIDTH_CHOICES: Final[list[float]] = [0.2 + i * _width_step for i in range(9)]
-
-# The selected choices for the resolution.
-_resolution_step = 16
-RESOLUTION_CHOICES: Final[list[int]] = [
-    48 + i * _resolution_step for i in range(12)
-]
-
-
-def configurations() -> Iterator[tuple[float, int]]:
-    """
-    Creates all 108 combinations of alpha (width multiplier) and rho (resolution)
-    as per the MCUNet paper.
-
-    Returns:
-        Iterator[tuple[float, int]]:
-            An iterator of all combinations.
-    """
-    for with_mult in WIDTH_CHOICES:
-        for resolution in RESOLUTION_CHOICES:
-            yield (with_mult, resolution)
-
-
-class SearchSpace():
-    """
-    Represents a search space with a given width multiplier and resolution. It
-    implements the ``Iterator`` pattern to randomly sample models.
-    """
-    width_mult: float
-    resolution: int
-
-    _rng: np.random.Generator | None
-
-    def __init__(self, width_mult: float, resolution: int) -> None:
-        self.width_mult = width_mult
-        self.resolution = resolution
-
-        self._rng = None
-
-    def oneshot(self) -> Model:
-        """
-        Samples one model from the search space. Meant to be used in a oneshot
-        way, where only one model is needed.
-
-        Returns:
-            Model:
-                A randomly sampled model from the MnasNet searchspace.
-        """
-        rng = np.random.default_rng()
-        return sample_model(rng, self.width_mult)
-
-    def __iter__(self) -> 'SearchSpace':
-        if self._rng is None:
-            self._rng = np.random.default_rng()
-
-        return self
-
-    def __next__(self) -> Model:
-        if self._rng is None:
-            raise StopIteration()
-
-        return sample_model(self._rng, self.width_mult)
+__all__ = ["SearchSpace", "SampleManager"]
 
 
 class SampleManager():
@@ -302,25 +218,6 @@ class SampleManager():
         return manager
 
 
-def _adjust_learning_rate(
-    optimizer: torch.optim.Optimizer,
-    epoch: int,
-    epochs: int,
-    batch: int,
-    batches: int,
-    initial_lr: float
-) -> float:
-    # Adjust the learning rate based on cosine annealing.
-    total = epochs * batches
-    cur = epoch * batches + batch
-    adjusted_lr = 0.5 * initial_lr * (1 + np.cos(np.pi * cur / total))
-
-    for group in optimizer.param_groups:
-        group["lr"] = adjusted_lr
-
-    return adjusted_lr
-
-
 def _test_and_add_to_top(
     top: list[tuple[OneShotNet, float]],
     population: Iterable[OneShotNet],
@@ -361,113 +258,14 @@ class SearchManager():
     _valid_ds: Dataset
 
     def __init__(
-        self,
-        space: SearchSpace | tuple[float, int],
-        ds: CustomDataset,
-        supernet: SuperNet | None = None
+        self, space: SearchSpace, ds: CustomDataset, supernet: SuperNet
     ) -> None:
-        if isinstance(space, tuple):
-            space = SearchSpace(*space)
-
         self._space = space
-
-        if supernet is None:
-            supernet = SuperNet(ds.classes, self._space.width_mult)
-
         self._supernet = supernet
         self._initial_lr = 0.05
 
         self._ds = ds
-        self._train_ds, self._valid_ds = random_split(ds, [0.85, 0.15])
-
-    def _warm_up(
-        self,
-        op: ConvOp,
-        epochs: int,
-        batches: int | None,
-        batch_size: int,
-        device=None
-    ) -> None:
-        max_model = uniform_model(
-            op,
-            max(KERNEL_CHOICES),
-            min(SE_CHOICES),
-            SkipOp.NOSKIP,
-            max(LAYER_CHOICES),
-            max(CHANNEL_CHOICES),
-            max(EXPANSION_CHOICES),
-            self._space.width_mult
-        )
-
-        net = build_model(max_model, self._ds.classes)
-
-        net.to(device)
-
-        dl = DataLoader(self._train_ds, batch_size, shuffle=True)
-        batches = batches if batches is not None else len(dl)
-
-        criterion = nn.CrossEntropyLoss()
-        optimizer = torch.optim.SGD(
-            net.parameters(), momentum=0.9, weight_decay=5e-5
-        )
-
-        net.train()
-
-        print(f"{' ' * 30} Warmup {str(op)}")
-        for i in range(epochs):
-            print(f"{'-' * 30} Epoch {i + 1}/{epochs} {'-' * 30}")
-
-            epoch_start = time.time()
-
-            for k, (images, labels) in enumerate(dl):
-                print(f"epoch={i + 1}, batch={k + 1:0{len(str(batches))}}/{batches}", end="")
-                batch_start = time.time()
-
-                images = images.to(device)
-                labels = labels.to(device)
-
-                outputs = net(images)
-                loss = criterion(outputs, labels)
-
-                net.zero_grad()
-
-                loss.backward()
-                optimizer.step()
-
-                batch_time = time.time() - batch_start
-
-                print(f", time={batch_time:.2f}s")
-
-                if batches == k + 1:
-                    break
-
-            epoch_time = time.time() - epoch_start
-
-            print()
-            print(f"time={epoch_time:.2f}s")
-            print()
-
-        for i, block in enumerate(self._supernet.blocks):
-            block = cast(SuperBlock, block)
-
-            choice = block.get_choice_block(op)
-            for j, layer in enumerate(choice.layers):
-                layer = cast(BaseChoiceOp, layer)
-                src = cast(BaseOp, net.blocks[i * max(LAYER_CHOICES) + j])
-
-                weight = src[Layer.CONV2D][0].weight
-
-                # Sort channels by L1 norm. The higher the better.
-                importance: list[tuple[int, float]] = []
-                for channel in range(weight.size()[0]):
-                    l1 = la.norm(weight[channel].view(-1), ord=1)
-                    insort_left(
-                        importance, (channel, l1), key=lambda entry: -entry[1]
-                    )
-
-                with torch.no_grad():
-                    for k, (channel, _) in enumerate(importance):
-                        layer.weight[k] = weight[channel]
+        self._train_ds, self._valid_ds = random_split(ds, [0.8, 0.2])
 
     def train(
         self,
@@ -482,113 +280,54 @@ class SearchManager():
         device=None
     ) -> None:
         """
-        Train the ``SuperNet`` by sampling random models per batch of training
-        data, setting the ``SuperNet`` to the sampled model and performing the
+        Train the `SuperNet` by sampling random models per batch of training
+        data, setting the `SuperNet` to the sampled model and performing the
         backward pass.
 
         Args:
             epochs (int):
                 The number of training epochs.
             batches (int, None):
-                The number of batches per epoch. If set to ``None`` use the whole
+                The number of batches per epoch. If set to `None` use the whole
                 training data set.
             batch_size (int):
                 The number of samples per batch for training.
             models_per_batch (int):
                 The number of models sampled per batch of training data.
             warm_up (bool):
-                If set to ``True`` train the largest sub-networks of the
-                ``SuperNet`` first to start the training with bettwer weights.
+                If set to `True` train the largest sub-networks of the
+                `SuperNet` first to start the training with bettwer weights.
             warm_up_epochs (int):
-                The number of warm up epochs. Only relevant if ``warm_up`` is
-                ``True``.
+                The number of warm up epochs. Only relevant if `warm_up` is
+                `True`.
             warm_up_batches (int, None):
-                The number of batches per warm up epoch. If set to ``None`` use
-                the whole training data set. Only relevant if ``warm_up`` is
-                ``True``.
+                The number of batches per warm up epoch. If set to `None` use
+                the whole training data set. Only relevant if `warm_up` is
+                `True`.
             warm_up_batch_size (int):
                 The number of samples per batch for warm up. Only relevant if
-                ``warm_up`` is ``True``.
+                `warm_up` is `True`.
         """
         if warm_up:
-            self._warm_up(
-                ConvOp.CONV2D,
-                warm_up_epochs,
-                warm_up_batches,
-                warm_up_batch_size,
-                device
-            )
-            self._warm_up(
-                ConvOp.DWCONV2D,
-                warm_up_epochs,
-                warm_up_batches,
-                warm_up_batch_size,
-                device
-            )
-            self._warm_up(
-                ConvOp.BDWRCONV2D,
+            self._supernet.run_warm_up(
+                self._space,
+                self._train_ds,
                 warm_up_epochs,
                 warm_up_batches,
                 warm_up_batch_size,
                 device
             )
 
-        models = iter(self._space)
-
-        self._supernet.to(device)
-
-        dl = DataLoader(self._train_ds, batch_size, shuffle=True)
-        batches = batches if batches is not None else len(dl)
-
-        criterion = nn.CrossEntropyLoss()
-        optimizer = torch.optim.SGD(
-            self._supernet.parameters(), lr=self._initial_lr
+        self._supernet.run_train(
+            self._space,
+            self._train_ds,
+            self._initial_lr,
+            epochs,
+            batches,
+            batch_size,
+            models_per_batch,
+            device
         )
-
-        self._supernet.train()
-
-        print(f"{' ' * 30} Training")
-        for i in range(epochs):
-            print(f"{'-' * 30} Epoch {i + 1}/{epochs} {'-' * 30}")
-
-            epoch_start = time.time()
-
-            for k, (images, labels) in enumerate(dl):
-                lr = _adjust_learning_rate(
-                    optimizer, i, epochs, k, batches, self._initial_lr
-                )
-
-                print(f"epoch={i + 1}, batch={k + 1:0{len(str(batches))}}/{batches}, lr={lr:.5f}", end="")
-
-                batch_start = time.time()
-
-                images = images.to(device)
-                labels = labels.to(device)
-
-                for _ in range(models_per_batch):
-                    model = next(models)
-                    self._supernet.set(model)
-
-                    outputs = self._supernet(images)
-                    loss = criterion(outputs, labels)
-
-                    self._supernet.zero_grad()
-
-                    loss.backward()
-                    optimizer.step()
-
-                batch_time = time.time() - batch_start
-
-                print(f", time={batch_time:.2f}s")
-
-                if batches == k + 1:
-                    break
-
-            epoch_time = time.time() - epoch_start
-
-            print()
-            print(f"time={epoch_time:.2f}s")
-            print()
 
     def evolution(
         self,
@@ -601,8 +340,40 @@ class SearchManager():
         mutation_rate: float = 0.1,
         fitness: Callable[[Model], bool] = lambda _: True,
         device=None
-    ) -> Iterable[tuple[OneShotNet, float]]:
-        dl = DataLoader(self._valid_ds, batch_size, shuffle=True)
+    ) -> tuple[tuple[OneShotNet, float]]:
+        """
+        Perform evoltion search on the `SuperNet` to find the model with the
+        highest accuracy. Per iteration, single-point crossover and mutation is
+        performed on the current population. Before the accuracy of a model is
+        tested, calibrate the batch-normalisation layers on the validation data.
+
+        Args:
+            topk (int):
+                The number of models with the highest accuracy to keep track off.
+            batch_size (int):
+                The batch size to use during validation.
+            calib_batch_size (int):
+                The batch size to use during the calibration of the
+                batch-normalisation layers.
+            iterations (int):
+                For how many generations the evaluation search should run.
+            population_size (int):
+                The size of the population per generation.
+            next_gen_split (tuple[float, float]):
+                The percentages the next population is made up for from crossover
+                and mutation.
+            mutation_rate (float):
+                Threashold for mutation to take effect.
+            fitness (Callable[[Model], bool]):
+                Evaluate the fitness of a sampled model on some criteria. Only
+                models where `fitness` returns `True` are selected for the
+                population of a generation.
+
+        Returns:
+            tuple[tuple[OneShotNet, float]]:
+                The final `topk` many models and their accuracy.
+        """
+        dl = DataLoader(self._valid_ds, batch_size, shuffle=False)
         calib_dl = DataLoader(self._valid_ds, calib_batch_size, shuffle=True)
 
         population = initial_population(
@@ -615,22 +386,22 @@ class SearchManager():
         n_cross: Final[int] = int(population_size * next_gen_split[0])
         n_mut: Final[int] = int(population_size * next_gen_split[1])
 
-        print(f"{' ' * 30} Evolution")
+        print(_make_caption("Evolution", 70, " "))
         for i in range(iterations):
-            print(f"{'-' * 30} Iteration {i + 1}/{iterations} {'-' * 30}")
+            print(_make_caption(f"Iteration {i + 1}/{iterations}", 70, "-"))
 
             iteration_start = time.time()
 
-            print(f"iteration={i + 1}, method=test-and-add", end=", ")
-            test_start = time.time()
+            print(f"iteration={i + 1}, method=test-and-add", end="")
 
+            test_start = time.time()
             _test_and_add_to_top(top, population, dl, calib_dl, device)
             top = top[:topk]
-
             test_time = time.time() - test_start
-            print(f"time={test_time:.2f}s")
 
-            print(f"iteration={i + 1}, method=crossover", end=", ")
+            print(f", time={test_time:.2f}s")
+
+            print(f"iteration={i + 1}, method=crossover", end="")
             crossover_start = time.time()
 
             cross: list[OneShotNet] = []
@@ -646,9 +417,9 @@ class SearchManager():
                 cross.append(child)
 
             crossover_time = time.time() - crossover_start
-            print(f"time={crossover_time:.2f}s")
+            print(f", time={crossover_time:.2f}s")
 
-            print(f"iteration={i + 1}, method=mutate", end=", ")
+            print(f"iteration={i + 1}, method=mutate", end="")
             mutate_start = time.time()
 
             mut: list[OneShotNet] = [
@@ -657,28 +428,37 @@ class SearchManager():
             ]
 
             mutate_time = time.time() - mutate_start
-            print(f"time={mutate_time:.2f}s")
+            print(f", time={mutate_time:.2f}s")
 
             population = cross + mut
 
             iteration_time = time.time() - iteration_start
+
             print()
             print(f"time={iteration_time:.2f}s")
             print()
 
+        print(_make_caption("Final Population", 70, "-"))
+        print(f"method=test-and-add", end="")
+
+        test_start = time.time()
         _test_and_add_to_top(top, population, dl, calib_dl, device)
-        return top[:topk]
+        test_time = time.time() - test_start
+
+        print(f", time={test_time:.2f}s")
+
+        return tuple(top[:topk])
 
     def to_dict(self) -> dict[str, Any]:
         """
-        Converts this instance of ``SearchManager`` to a ``dict``. This can
-        then be used to save and reload this instance for later use. This way
-        the training and evolution search can be paused and later resumed. It
-        doesn't save the state of the ``Dataset``.
+        Converts this instance of `SearchManager` to a `dict`. This can then be
+        used to save and reload this instance for later use. This way the
+        training and evolution search can be paused and later resumed. It
+        doesn't save the state of the `Dataset`.
 
         Returns:
             dict[str, Any]:
-                A ``dict`` containing the content of this manager.
+                A `dict`` containing the content of this manager.
         """
         return {
             "width_mult": self._space.width_mult,
@@ -691,15 +471,16 @@ class SearchManager():
     def from_dict(
         cls,
         config: dict[str, Any],
+        space: Callable[[float, int], SearchSpace],
         ds: CustomDataset,
-        batch_size: int = 256
+        supernet: SuperNet
     ) -> 'SearchManager':
         """
-        Converts a ``dict`` to a ``SearchManager``.
+        Converts a `dict` to a `SearchManager`.
 
         Args:
             config (dict[str, Any]):
-                The ``dict`` containing the content of a manager to be loaded.
+                The `dict`` containing the content of a manager to be loaded.
             ds (Dataset):
                 The training and validation data.
             batch_size (int):
@@ -707,7 +488,7 @@ class SearchManager():
 
         Returns:
             SearchManager:
-                The manager constructed from the ``dict``.
+                The manager constructed from the `dict`.
         """
         width_mult, resolution, classes, weights = \
             itemgetter("width_mult", "resolution", "classes", "weights")(config)
@@ -717,7 +498,7 @@ class SearchManager():
                 f"classes mismatch: expected {classes} data set has {ds.classes}"
             )
 
-        manager = cls((width_mult, resolution), ds, batch_size, None)
+        manager = cls(space(width_mult, resolution), ds, supernet)
         manager._supernet.load_state_dict(weights)
 
         return manager

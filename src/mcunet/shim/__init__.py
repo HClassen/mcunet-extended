@@ -13,7 +13,13 @@ from ..tinynas.searchspace import ConvOp, SkipOp, Model
 from .layers import *
 
 
-__all__ = ["convert_weights", "build_model", "to_tflite"]
+__all__ = [
+    "convert_weights", "build_model", "to_tflite", "train_fast", "to_tflite_fast"
+]
+
+# Shut Tensorflow up.
+tf.get_logger().setLevel("ERROR")
+tf.autograph.set_verbosity(0)
 
 
 def _convert(entry: tuple[list[str], list[np.ndarray]]) -> list[np.ndarray]:
@@ -96,8 +102,8 @@ def _build_op(
                 norm_layer=norm_layer,
                 activation_layer=activation_layer
             )
-        case ConvOp.MBCONV2D:
-            return KerasMBConv2dOp(
+        case ConvOp.BDWRCONV2D:
+            return KerasBDWRConv2dOp(
                 in_channels,
                 out_channels,
                 expansion_ratio,
@@ -120,7 +126,7 @@ def build_model(
     activation_layer: str = "relu6"
 ) -> keras.Sequential:
     """
-    Build a ``keras.Sequential`` from a given ``Model``.
+    Build a `keras.Sequential` from a given `Model`.
 
     Args:
         model (Model):
@@ -140,8 +146,7 @@ def build_model(
             The created Keras model.
 
     """
-    in_channels = model.blocks[0].in_channels
-
+    in_channels = model.blocks[0].layers[0].in_channels
     first = [
         KerasConv2dNormActivation(
             in_channels,
@@ -154,25 +159,21 @@ def build_model(
 
     blocks: list[KerasBaseOp] = []
     for block in model.blocks:
-        for i in range(block.n_layers):
-            stride = block.first_stride if i == 0 else 1
-
+        for layer in block.layers:
             blocks.append(
                 _build_op(
-                    block.conv_op,
-                    in_channels,
-                    block.out_channels,
-                    block.expansion_ratio,
-                    block.se_ratio,
-                    block.skip_op,
-                    block.kernel_size,
-                    stride,
+                    layer.op,
+                    layer.in_channels,
+                    layer.out_channels,
+                    layer.expansion_ratio,
+                    layer.se_ratio,
+                    layer.skip_op,
+                    layer.kernel_size,
+                    layer.stride,
                     norm_layer,
                     activation_layer
                 )
             )
-
-            in_channels = block.out_channels
 
     last: list[keras.Layer] = [
         KerasConv2dNormActivation(
@@ -214,7 +215,8 @@ def get_train_datasets(
         seed=seed,
         validation_split=validation_split,
         subset=subset,
-        data_format="channels_last"
+        data_format="channels_last",
+        verbose=False
     )
 
 
@@ -226,11 +228,42 @@ def _sample(ds: tf.data.Dataset):
     return sample
 
 
-def to_tflite(net: keras.Sequential, ds: tf.data.Dataset):
+def to_tflite(net: keras.Sequential, ds: tf.data.Dataset) -> bytes:
     converter = tf.lite.TFLiteConverter.from_keras_model(net)
 
     converter.optimizations = [tf.lite.Optimize.DEFAULT]
     converter.representative_dataset = _sample(ds)
+    converter.target_spec.supported_ops = [tf.lite.OpsSet.TFLITE_BUILTINS_INT8]
+    converter.inference_input_type = tf.uint8
+    converter.inference_output_type = tf.uint8
+
+    return converter.convert()
+
+
+def train_fast(net: keras.Sequential, resolution: int) -> None:
+    net.compile(
+        optimizer="sgd",
+        loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
+        metrics=["accuracy"]
+    )
+
+    net.fit(
+        tf.ones([1, resolution, resolution, 3]),
+        tf.ones([1]),
+        epochs=1,
+        verbose=0
+    )
+
+
+def to_tflite_fast(net: keras.Sequential, resolution: int) -> bytes:
+    def sample():
+        data = np.random.rand(1, resolution, resolution, 3)
+        yield [data.astype(np.float32)]
+
+    converter = tf.lite.TFLiteConverter.from_keras_model(net)
+
+    converter.optimizations = [tf.lite.Optimize.DEFAULT]
+    converter.representative_dataset = sample
     converter.target_spec.supported_ops = [tf.lite.OpsSet.TFLITE_BUILTINS_INT8]
     converter.inference_input_type = tf.uint8
     converter.inference_output_type = tf.uint8

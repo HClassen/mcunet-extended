@@ -8,7 +8,7 @@ import keras
 __all__ = [
     "KerasConv2dNormActivation", "KerasDWConv2dNormActivation",
     "KerasSqueezeExcitation",
-    "KerasBaseOp", "KerasConv2dOp", "KerasDWConv2dOp", "KerasMBConv2dOp"
+    "KerasBaseOp", "KerasConv2dOp", "KerasDWConv2dOp", "KerasBDWRConv2dOp"
 ]
 
 
@@ -282,7 +282,7 @@ class KerasDWConv2dOp(KerasBaseOp):
         return self.norm(inputs)
 
 
-class KerasMBConv2dOp(KerasBaseOp):
+class KerasBDWRConv2dOp(KerasBaseOp):
     """
     A functional copy of mcunet.tinynas.mnasnet.layers.MBConv2dOp.
     """

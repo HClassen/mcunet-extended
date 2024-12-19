@@ -3,7 +3,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 
-__all__ = ["make_divisible", "EDF"]
+__all__ = ["make_divisible", "make_caption", "EDF"]
 
 
 def make_divisible(v: float, divisor: int, min_value: int | None = None) -> int:
@@ -27,6 +27,13 @@ def make_divisible(v: float, divisor: int, min_value: int | None = None) -> int:
     if new_v < 0.9 * v:
         new_v += divisor
     return new_v
+
+def make_caption(text: str, line_length: int, divider: str) -> str:
+    diff = line_length - len(text)
+    dashes = int((diff - 2) / 2) * divider
+
+    caption = f"{dashes} {text} {dashes}"
+    return f"{caption}{divider * (line_length - len(caption))}"
 
 
 class EDF():

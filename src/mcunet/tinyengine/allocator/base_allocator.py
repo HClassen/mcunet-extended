@@ -20,7 +20,6 @@ import matplotlib
 import matplotlib.pyplot as plt
 import numpy
 from matplotlib.ticker import MaxNLocator
-from tqdm import tqdm
 
 from ..constant import (
     FIGURE_CONFIG,
@@ -76,7 +75,7 @@ class BaseAllocator:
     def allocate(self):
         # place each rectangle
         print(f"Deriving the memory schedule for {len(self.rectangles)} activation tensors.")
-        for cnt, rec in enumerate(tqdm(self.rectangles)):
+        for rec in self.rectangles:
             # fit each tensor into the memmory
             rec["placement"] = self.fit(rec)
 
@@ -113,6 +112,9 @@ class BaseAllocator:
         return peak
 
     def visualize(self, path, train_start_idx=-1, scale=1024):
+        if path is None:
+            return
+
         fig = plt.figure()
         ax = fig.add_subplot(111)
         max_y = max_x = 0

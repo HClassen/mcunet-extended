@@ -17,8 +17,7 @@ dependencies = [
     "matplotlib",
     "pyqt6",
     "numpy == 1.26.4",
-    "pandas",
-    "tdqm",
+    "pandas"
 ]
 
 [tool.setuptools.packages.find]

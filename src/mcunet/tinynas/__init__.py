@@ -1,7 +1,7 @@
 import time
 from typing import Any, Final
 from bisect import insort_left
-from multiprocessing import get_start_method, set_start_method, Pool
+from multiprocessing import get_start_method, set_start_method, cpu_count, Pool
 from itertools import islice
 from collections.abc import Callable, Iterable, Iterator
 
@@ -74,7 +74,7 @@ class SampleManager():
             m (int):
                 The amount of samples to be generated.
         """
-        with Pool() as pool:
+        with Pool(cpu_count() - 1) as pool:
             results = pool.map(_sample, [(m, space) for space in self._spaces])
 
             self._models = [result for result in results]
@@ -109,7 +109,7 @@ class SampleManager():
 
         saved = get_start_method()
         set_start_method("spawn", force=True)
-        with Pool() as pool:
+        with Pool(cpu_count() - 1) as pool:
             results = [
                 pool.apply_async(_apply, (chunk, fn, m))
                 for chunk in zip(self._models, self._spaces)

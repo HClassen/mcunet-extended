@@ -1,7 +1,8 @@
 import time
-from itertools import islice
 from typing import Any, Final
 from bisect import insort_left
+from multiprocessing import get_start_method, set_start_method, Pool
+from itertools import islice
 from collections.abc import Callable, Iterable, Iterator
 
 import torch.nn as nn
@@ -28,6 +29,31 @@ from .utils import make_caption
 __all__ = ["SearchSpace", "SampleManager"]
 
 
+def _sample(args: tuple[int, SearchSpace]) -> list[list[Model]]:
+    m, space = args
+
+    return list(islice(space, m))
+
+
+def _apply(
+    chunk: tuple[Model, SearchSpace],
+    fn: Callable[[Model, float, int], tuple[Any, ...]],
+    m: int | None
+) -> tuple[SearchSpace, tuple[Any, ...]]:
+    samples, space = chunk
+
+    sampled = len(samples)
+    end = min(m, sampled) if m is not None else sampled
+
+    return (
+        space,
+        tuple(
+            fn(model, space.width_mult, space.resolution)
+            for model in samples[:end]
+        )
+    )
+
+
 class SampleManager():
     """
     Handle sampling models from different search spaces and extracting different
@@ -48,7 +74,10 @@ class SampleManager():
             m (int):
                 The amount of samples to be generated.
         """
-        self._models = [list(islice(space, m)) for space in self._spaces]
+        with Pool() as pool:
+            results = pool.map(_sample, [(m, space) for space in self._spaces])
+
+            self._models = [result for result in results]
 
     def apply(
         self,
@@ -78,17 +107,18 @@ class SampleManager():
         if not self._models:
             raise RuntimeError("no models sampled")
 
-        for samples, space in zip(self._models, self._spaces):
-            sampled = len(samples)
-            end = min(m, sampled) if m is not None else sampled
+        saved = get_start_method()
+        set_start_method("spawn", force=True)
+        with Pool() as pool:
+            results = [
+                pool.apply_async(_apply, (chunk, fn, m))
+                for chunk in zip(self._models, self._spaces)
+            ]
 
-            yield (
-                space,
-                (
-                    fn(model, space.width_mult, space.resolution)
-                    for model in samples[:end]
-                )
-            )
+            for result in results:
+                yield result.get()
+
+        set_start_method(saved, force=True)
 
     def to_dict(self) -> dict[str, Any]:
         """

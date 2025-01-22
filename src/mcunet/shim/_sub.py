@@ -9,6 +9,9 @@ from mcunet.tinynas.searchspace import Model
 from mcunet.tinyengine.TfliteConvertor import TfliteConvertor
 from mcunet.tinyengine.GeneralMemoryScheduler import GeneralMemoryScheduler
 
+import tensorflow as tf
+tf.config.set_visible_devices([], "GPU")
+
 
 def main() -> None:
     while True:

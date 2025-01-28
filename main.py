@@ -1,70 +1,109 @@
+import argparse
+import multiprocessing
+from pathlib import Path
+from collections.abc import Callable
+
 import torch
 
 from mcunet.tinynas import SampleManager
-from mcunet.tinynas.searchspace import configurations
+from mcunet.tinynas.searchspace import configurations, Model
 from mcunet.tinynas.searchspace.model import build_model
 from mcunet.tinynas.configurations.mnasnetplus import MnasNetPlus
 
-import mcunet.shim as shim
-
-from mcunet.tinyengine.TfliteConvertor import TfliteConvertor
-from mcunet.tinyengine.GeneralMemoryScheduler import GeneralMemoryScheduler
-
-import tensorflow as tf
-tf.config.set_visible_devices([], "GPU")
+from mcunet.shim.runner import ShimSubprocessManager
 
 
-def measure(model, width_mult, resolution) -> tuple[int, int, int]:
-    net1 = build_model(model, 1000)
-    flops = net1.flops(resolution, device=torch.device("cuda:0"))
+def _measure_wrapper(
+    classes: int, runner: ShimSubprocessManager
+) -> Callable[[Model, float, int], tuple[int, int, int]]:
+    def measure(
+        model: Model, width_mult: float, resolution: int
+    ) -> tuple[int, int, int]:
+        net = build_model(model, classes)
+        flops = net.flops(resolution, device=torch.device("cuda:0"))
 
-    net2 = shim.build_model(model, 1000)
-    shim.dummy_train(net2, resolution)
-    tflite = shim.dummy_to_tflite(net2, resolution)
+        flash, sram = runner.memory_footprint(model, classes, resolution)
 
-    converter = TfliteConvertor(tflite)
-    converter.parseOperatorInfo()
+        return flops, flash, sram
 
-    out = []
-    layer = converter.layer
-    memory_scheduler = GeneralMemoryScheduler(
-        layer,
-        False,
-        False,
-        outputTables=out,
-        inplace=True,
-        mem_visual_path=None,
-        VisaulizeTrainable=False,
-    )
-    memory_scheduler.USE_INPLACE = True
-    memory_scheduler.allocateMemory()
-
-    flash = memory_scheduler.flash
-    sram = memory_scheduler.buffers["input_output"]
-
-    del net1
-    del net2
-    del tflite
-    shim.clear_keras()
-
-    return flops, flash, sram
+    return measure
 
 
-def main() -> None:
-    spaces = [MnasNetPlus(a, b) for a, b in configurations()]
+def _func(
+    samples: int, spaces: list[MnasNetPlus], classes: int, path: Path
+) -> None:
     manager = SampleManager(spaces)
+    manager.sample(samples)
 
-    manager.sample(1000)
+    runner = ShimSubprocessManager(2)
+    measure = _measure_wrapper(classes, runner)
 
     for space, results in manager.apply(measure):
         name = space.__class__.__name__.lower()
         width_mult = str(space.width_mult)[:3].replace(".", "_")
 
-        with open(f"{name}-{width_mult}-{space.resolution}.csv", "w") as f:
+        csv = f"{name}-{width_mult}-{space.resolution}-{classes}.csv"
+        with open(path / csv, "w") as f:
             f.write("flops,flash,sram\n")
 
             for result in results:
                 f.write(f"{result[0]},{result[1]},{result[2]}\n")
+
+    runner.stop()
+
+
+def _spaces_as_chunks(chunks: int) -> list[list[MnasNetPlus]]:
+    spaces = [MnasNetPlus(a, b) for a, b in configurations()]
+
+    chunked: list[list[MnasNetPlus]] = []
+
+    cut = len(spaces)
+    while cut % chunks != 0:
+        cut -= 1
+
+    n = int(cut / chunks)
+    for i in range(0, cut - n, n):
+        chunked.append(spaces[i:i + n])
+
+    chunked.append(spaces[cut - n:])
+
+    return chunked
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "samples", help="sample size per search space", type=int, default=1000
+    )
+    parser.add_argument(
+        "classes", help="classes of all models", type=int
+    )
+    parser.add_argument(
+        "results", help="path to store results", type=str
+    )
+    parser.add_argument(
+        "-c", "--cores", help="number of cpu cores to use", type=int, default=1
+    )
+    args = parser.parse_args()
+
+    results = Path(args.results)
+    results.mkdir(parents=True, exist_ok=True)
+
+    chunks = _spaces_as_chunks(args.cores)
+
+    processes: list[multiprocessing.Process] = []
+    ctx = multiprocessing.get_context("spawn")
+    for core in range(args.cores):
+        p = ctx.Process(
+            target=_func,
+            args=(args.samples, chunks[core], args.classes, results,)
+        )
+        p.start()
+
+        processes.append(p)
+
+    for p in processes:
+        p.join()
 
 
 if __name__ == "__main__":

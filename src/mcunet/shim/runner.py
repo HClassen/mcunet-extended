@@ -105,6 +105,26 @@ class SubprocessManager():
         self._destroy_children()
 
 
+class ShimSubprocessManager(SubprocessManager):
+    def __init__(self, n: int, limit: int = 1000, lazy: bool = False) -> None:
+        path = Path(__file__).parent / "_sub.py"
+
+        super().__init__(path, n, limit, lazy)
+
+    def memory_footprint(
+        self, model: Model, classes: int, resolution: int
+    ) -> tuple[int, int]:
+        results = self.submit(
+            json.dumps({
+                "model": model.to_dict(),
+                "classes": classes,
+                "resolution": resolution
+            })
+        )
+
+        data = json.loads(results[-1])
+        return data["flash"], data["sram"]
+
 _shim_runner: SubprocessManager | None = None
 
 

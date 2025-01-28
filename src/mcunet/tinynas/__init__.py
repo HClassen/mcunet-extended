@@ -36,9 +36,12 @@ class SampleManager():
     _spaces: list[SearchSpace]
     _models: list[list[Model]] | None
 
+    _sample_size: int | None
+
     def __init__(self, spaces: list[SearchSpace]) -> None:
         self._spaces = spaces
         self._models = None
+        self._sample_size = None
 
     def sample(self, m: int = 1000) -> None:
         """
@@ -48,7 +51,8 @@ class SampleManager():
             m (int):
                 The amount of samples to be generated.
         """
-        self._models = [list(islice(space, m)) for space in self._spaces]
+        # self._models = [list(islice(space, m)) for space in self._spaces]
+        self._sample_size = m
 
     def apply(
         self,
@@ -75,18 +79,17 @@ class SampleManager():
             RuntimeError:
                 If no models were sampled before this function is called.
         """
-        if not self._models:
+        if self._sample_size is None:
             raise RuntimeError("no models sampled")
 
-        for samples, space in zip(self._models, self._spaces):
-            sampled = len(samples)
-            end = min(m, sampled) if m is not None else sampled
+        for space in self._spaces:
+            end = min(m, self._sample_size) if m is not None else self._sample_size
 
             yield (
                 space,
                 (
                     fn(model, space.width_mult, space.resolution)
-                    for model in samples[:end]
+                    for model in islice(space, end)
                 )
             )
 

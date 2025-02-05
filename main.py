@@ -164,8 +164,7 @@ def main() -> None:
         warm_up=True,
         warm_up_ctx=full.FullWarmUpCtx(),
         warm_up_epochs=25,
-        warm_up_batch_size=256,
-        device=torch.device("cuda:0")
+        warm_up_batch_size=256
     )
     _save_manager(path_results / "supernet", manager)
 

@@ -369,13 +369,14 @@ def supernet_train(
     dl = DataLoader(ds, batch_size, shuffle=True)
     batches = batches if batches is not None else len(dl)
 
-    supernet.to(device)
     criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.SGD(supernet.parameters(), lr=initial_lr)
 
     scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(
         optimizer, 256
     )
+
+    parallel = nn.DataParallel(supernet)
 
     print(make_caption("Training", 70, " "))
     supernet.train()
@@ -390,14 +391,13 @@ def supernet_train(
 
             batch_start = time.time()
 
-            images = images.to(device)
-            labels = labels.to(device)
-
             for _ in range(models_per_batch):
                 model = next(models)
                 supernet.set(model)
 
-                outputs = supernet(images)
+                outputs = parallel(images)
+
+                labels = labels.to(outputs.device)
                 loss = criterion(outputs, labels)
 
                 optimizer.zero_grad()

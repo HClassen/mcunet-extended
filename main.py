@@ -158,26 +158,15 @@ def main() -> None:
 
     manager = SearchManager(space, ds, supernet)
     manager.train(
-        epochs=500,
+        epochs=1,
         batch_size=256,
         models_per_batch=4,
-        warm_up=True,
+        warm_up=False,
         warm_up_ctx=full.FullWarmUpCtx(),
         warm_up_epochs=25,
         warm_up_batch_size=256
     )
     _save_manager(path_results / "supernet", manager)
-
-    start_shim_runner()
-
-    max_flash = _parse_memory(args.flash)
-    max_sram = _parse_memory(args.sram)
-    fitness = _fitness_wrapper(ds.classes, args.resolution, max_flash, max_sram)
-    top = manager.evolution(fitness=fitness, device=torch.device("cuda:0"))
-
-    _save_top(path_results / "evolution", 5, top)
-
-    stop_shim_runner()
 
 
 if __name__ == "__main__":

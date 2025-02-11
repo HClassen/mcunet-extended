@@ -35,7 +35,7 @@ class GeneralMemoryScheduler:
         layer,
         tflite_op=False,
         dummy_address=False,
-        memory_limit=10 * 1024 * 1024,
+        memory_limit=1024**3,
         inplace=True,
         outputTables=None,
         mem_visual_path="codegen/allocation.png",

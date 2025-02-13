@@ -22,7 +22,7 @@ from .oneshot import (
 )
 from .datasets import CustomDataset
 from .mobilenet import skeletonnet_valid
-from .utils import make_caption
+from .utils import make_caption, Logger, NopLogger
 
 
 __all__ = ["SearchSpace", "SampleManager"]
@@ -185,8 +185,14 @@ class SearchManager():
     _train_ds: Dataset
     _valid_ds: Dataset
 
+    _logger: Logger
+
     def __init__(
-        self, space: SearchSpace, ds: CustomDataset, supernet: SuperNet
+        self,
+        space: SearchSpace,
+        ds: CustomDataset,
+        supernet: SuperNet,
+        logger: Logger | None
     ) -> None:
         self._space = space
         self._supernet = supernet
@@ -194,6 +200,8 @@ class SearchManager():
 
         self._ds = ds
         self._train_ds, self._valid_ds = random_split(ds, [0.8, 0.2])
+
+        self._logger = logger if logger is not None else NopLogger()
 
     def train(
         self,
@@ -251,6 +259,7 @@ class SearchManager():
                 self._train_ds,
                 warm_up_epochs,
                 warm_up_batch_size,
+                logger=self._logger,
                 batches=warm_up_batches,
                 device=device
             )
@@ -263,6 +272,7 @@ class SearchManager():
             epochs,
             batch_size,
             models_per_batch,
+            logger=self._logger,
             batches=batches,
             device=device
         )
@@ -328,13 +338,15 @@ class SearchManager():
         n_cross: Final[int] = int(population_size * next_gen_split[0])
         n_mut: Final[int] = int(population_size * next_gen_split[1])
 
-        print(make_caption("Evolution", 70, " "))
+        self._logger.log(make_caption("Evolution", 70, " "))
         for i in range(iterations):
-            print(make_caption(f"Iteration {i + 1}/{iterations}", 70, "-"))
+            self._logger.log(
+                make_caption(f"Iteration {i + 1}/{iterations}", 70, "-")
+            )
 
             iteration_start = time.time()
 
-            print(f"iteration={i + 1}, method=test-and-add", end="")
+            self._logger.log(f"iteration={i + 1}, method=test-and-add", end="")
 
             test_start = time.time()
             _test_and_add_to_top(
@@ -349,9 +361,9 @@ class SearchManager():
             top = top[:topk]
             test_time = time.time() - test_start
 
-            print(f", time={test_time:.2f}s")
+            self._logger.log(f", time={test_time:.2f}s")
 
-            print(f"iteration={i + 1}, method=crossover", end="")
+            self._logger.log(f"iteration={i + 1}, method=crossover", end="")
             crossover_start = time.time()
 
             cross: list[OneShotNet] = []
@@ -367,9 +379,9 @@ class SearchManager():
                 cross.append(child)
 
             crossover_time = time.time() - crossover_start
-            print(f", time={crossover_time:.2f}s")
+            self._logger.log(f", time={crossover_time:.2f}s")
 
-            print(f"iteration={i + 1}, method=mutate", end="")
+            self._logger.log(f"iteration={i + 1}, method=mutate", end="")
             mutate_start = time.time()
 
             mut: list[OneShotNet] = [
@@ -378,15 +390,15 @@ class SearchManager():
             ]
 
             mutate_time = time.time() - mutate_start
-            print(f", time={mutate_time:.2f}s")
+            self._logger.log(f", time={mutate_time:.2f}s")
 
             population = cross + mut
 
             iteration_time = time.time() - iteration_start
-            print(f"\ntime={iteration_time:.2f}s\n")
+            self._logger.log(f"\ntime={iteration_time:.2f}s\n")
 
-        print(make_caption("Final Population", 70, "-"))
-        print(f"method=test-and-add", end="")
+        self._logger.log(make_caption("Final Population", 70, "-"))
+        self._logger.log(f"method=test-and-add", end="")
 
         test_start = time.time()
         _test_and_add_to_top(
@@ -399,7 +411,7 @@ class SearchManager():
                 device=device
             )
         test_time = time.time() - test_start
-        print(f", time={test_time:.2f}s")
+        self._logger.log(f", time={test_time:.2f}s")
 
         return tuple(top[:topk])
 

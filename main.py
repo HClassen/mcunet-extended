@@ -19,6 +19,7 @@ from mcunet.tinynas.configurations.mnasnetplus import (
     MnasNetPlus
 )
 from mcunet.tinynas.configurations.mnasnetplus.share import full
+from mcunet.tinynas.utils import ConsoleLogger
 
 from mcunet.shim.runner import (
     memory_footprint,
@@ -156,7 +157,7 @@ def main() -> None:
         initialize_weights=False
     )
 
-    manager = SearchManager(space, ds, supernet)
+    manager = SearchManager(space, ds, supernet, ConsoleLogger())
     manager.train(
         epochs=500,
         batch_size=256,

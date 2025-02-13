@@ -1,9 +1,16 @@
+from pathlib import Path
+from abc import ABC, abstractmethod
+
 import numpy as np
 
 import matplotlib.pyplot as plt
 
 
-__all__ = ["make_divisible", "make_caption", "EDF"]
+__all__ = [
+    "make_divisible",
+    "make_caption", "Logger", "NopLogger", "ConsoleLogger", "FileLogger",
+    "EDF"
+]
 
 
 def make_divisible(v: float, divisor: int, min_value: int | None = None) -> int:
@@ -35,6 +42,41 @@ def make_caption(text: str, line_length: int, divider: str) -> str:
 
     caption = f"{dashes} {text} {dashes}"
     return f"{caption}{divider * (line_length - len(caption))}"
+
+
+class Logger(ABC):
+    @abstractmethod
+    def log(self, msg: str, end: str = "\n") -> None:
+        pass
+
+
+class NopLogger(Logger):
+    def log(self, msg: str, end: str = "\n") -> None:
+        pass
+
+
+class ConsoleLogger(Logger):
+    def log(self, msg: str, end: str = "\n") -> None:
+        print(msg, end=end)
+
+
+class FileLogger(Logger):
+    _path: Path
+
+    def __init__(self, path: str | Path) -> None:
+        if isinstance(path, str):
+            path = Path(path)
+
+        self._path = path
+        self._file = open(self._path, "w")
+
+    def __del__(self) -> None:
+        self._file.close()
+
+    def log(self, msg: str, end: str = "\n") -> None:
+        self._file.write(msg)
+        self._file.write(end)
+        self._file.flush()
 
 
 class EDF():

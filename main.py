@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 
 # Parameters and DataLoaders
@@ -18,7 +19,7 @@ class RandomDataset(Dataset):
         self.data = torch.randn(length, size)
 
     def __getitem__(self, index):
-        return self.data[index]
+        return self.data[index], 0 if int(torch.randn(1)) <= 0 else 1
 
     def __len__(self):
         return self.len
@@ -48,8 +49,17 @@ if torch.cuda.device_count() > 1:
 
 model.to(device)
 
-for data in rand_loader:
+criterion = nn.CrossEntropyLoss()
+optimizer = optim.SGD(model.parameters())
+
+for data, label in rand_loader:
     input = data.to(device)
+    label = label.to(device)
     output = model(input)
     print("Outside: input size", input.size(),
           "output_size", output.size())
+
+    loss = criterion(output, label)
+    optimizer.zero_grad()
+    loss.backward()
+    optimizer.step()

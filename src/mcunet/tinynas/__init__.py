@@ -25,7 +25,7 @@ from .oneshot import (
     TrainCtx
 )
 from .datasets import CustomDataset
-from .utils import make_caption
+from .utils import make_caption, Logger, SilentLogger
 
 
 __all__ = ["SearchSpace", "SampleManager"]
@@ -246,12 +246,15 @@ class SearchManager():
     _train_ds: CustomDataset
     _valid_ds: CustomDataset
 
+    _logger: Logger
+
     def __init__(
         self,
         space: SearchSpace,
         train_ds: CustomDataset,
         valid_ds: CustomDataset,
-        supernet: SuperNet
+        supernet: SuperNet,
+        logger: Logger | None = None
     ) -> None:
         self._space = space
         self._supernet = supernet
@@ -263,6 +266,8 @@ class SearchManager():
             )
         self._train_ds = train_ds
         self._valid_ds = valid_ds
+
+        self._logger = logger if logger is not None else SilentLogger()
 
     def train(
         self,
@@ -325,6 +330,7 @@ class SearchManager():
                 warm_up_ctx,
                 warm_up_dl,
                 warm_up_epochs,
+                logger=self._logger,
                 batches=warm_up_batches,
                 device=device
             )
@@ -337,6 +343,7 @@ class SearchManager():
             self._initial_lr,
             epochs,
             models_per_batch,
+            logger=self._logger,
             ctx=ctx,
             batches=batches,
             device=device
@@ -413,18 +420,20 @@ class SearchManager():
         n_cross: Final[int] = int(population_size * next_gen_split[0])
         n_mut: Final[int] = int(population_size * next_gen_split[1])
 
-        print(make_caption("Evolution", 70, " "))
+        self._logger.log(make_caption("Evolution", 70, " "))
 
         population = initial_population(
             iter(self._space), population_size, fitness
         )
 
         for i in range(iterations):
-            print(make_caption(f"Iteration {i + 1}/{iterations}", 70, "-"))
+            self._logger.log(
+                make_caption(f"Iteration {i + 1}/{iterations}", 70, "-")
+            )
 
             iteration_start = time.time()
 
-            print(f"iteration={i + 1}, method=evaluate", end="")
+            self._logger.log(f"iteration={i + 1}, method=evaluate", end="")
 
             test_start = time.time()
             accuracies = evaluate(
@@ -438,7 +447,7 @@ class SearchManager():
             )
             test_time = time.time() - test_start
 
-            print(f", time={test_time:.2f}s")
+            self._logger.log(f", time={test_time:.2f}s")
 
             _add_to_top(top, population, accuracies)
             top = top[:topk]
@@ -446,7 +455,7 @@ class SearchManager():
             if ctx is not None:
                 ctx.iteration(i + 1, population, top)
 
-            print(f"iteration={i + 1}, method=crossover", end="")
+            self._logger.log(f"iteration={i + 1}, method=crossover", end="")
             crossover_start = time.time()
 
             cross: list[Model] = []
@@ -467,9 +476,9 @@ class SearchManager():
             cross = cross[:n_cross]
 
             crossover_time = time.time() - crossover_start
-            print(f", time={crossover_time:.2f}s")
+            self._logger.log(f", time={crossover_time:.2f}s")
 
-            print(f"iteration={i + 1}, method=mutate", end="")
+            self._logger.log(f"iteration={i + 1}, method=mutate", end="")
             mutate_start = time.time()
 
             mut: list[Model] = []
@@ -482,15 +491,15 @@ class SearchManager():
                     mut.append(mutated)
 
             mutate_time = time.time() - mutate_start
-            print(f", time={mutate_time:.2f}s")
+            self._logger.log(f", time={mutate_time:.2f}s")
 
             population = cross + mut
 
             iteration_time = time.time() - iteration_start
-            print(f"\ntime={iteration_time:.2f}s\n")
+            self._logger.log(f"\ntime={iteration_time:.2f}s\n")
 
-        print(make_caption("Final Population", 70, "-"))
-        print(f"method=evaluate", end="")
+        self._logger.log(make_caption("Final Population", 70, "-"))
+        self._logger.log(f"method=evaluate", end="")
 
         test_start = time.time()
         accuracies = evaluate(
@@ -503,7 +512,7 @@ class SearchManager():
             device=device
         )
         test_time = time.time() - test_start
-        print(f", time={test_time:.2f}s")
+        self._logger.log(f", time={test_time:.2f}s")
 
         _add_to_top(top, population, accuracies)
         top = top[:topk]
@@ -543,6 +552,7 @@ class SearchManager():
         train_ds: CustomDataset,
         valid_ds: CustomDataset,
         supernet: SuperNet,
+        logger: Logger | None = None
     ) -> 'SearchManager':
         """
         Converts a `dict` to a `SearchManager`.
@@ -558,6 +568,8 @@ class SearchManager():
                 The validation data set.
             supernet (SuperNet):
                 The supernet.
+            logger (Logger, None):
+                An optional logger.
 
         Returns:
             SearchManager:
@@ -577,7 +589,7 @@ class SearchManager():
         width_mult = config["width_mult"]
         resolution = config["resolution"]
         manager = cls(
-            space(width_mult, resolution), train_ds, valid_ds, supernet
+            space(width_mult, resolution), train_ds, valid_ds, supernet, logger
         )
         manager._supernet.load_state_dict(config["weights"])
 

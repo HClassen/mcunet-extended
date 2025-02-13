@@ -3,7 +3,7 @@ import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 
 # Parameters and DataLoaders
-input_size = 5
+input_size = 9_000_000
 output_size = 2
 
 batch_size = 30

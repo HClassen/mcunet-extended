@@ -159,9 +159,9 @@ def main() -> None:
 
     manager = SearchManager(space, ds, supernet, ConsoleLogger())
     manager.train(
-        epochs=500,
+        epochs=300,
         batch_size=256,
-        models_per_batch=4,
+        models_per_batch=2,
         warm_up=True,
         warm_up_ctx=full.FullWarmUpCtx(),
         warm_up_epochs=25,

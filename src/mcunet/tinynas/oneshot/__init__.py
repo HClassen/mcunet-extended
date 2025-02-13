@@ -28,7 +28,7 @@ from ..mobilenet import (
 from ..searchspace import Layer, Block, Model
 from ..searchspace.layers import module_to_layer
 from ..searchspace.model import build_model
-from ..utils import make_divisible, make_caption
+from ..utils import make_divisible, make_caption, Logger
 
 from .layers import ChoiceBlockConstructor, ChoiceBlock, LastChoiceLayer
 from .share import ParameterSharerConstructor
@@ -289,6 +289,7 @@ def supernet_warm_up(
     epochs: int,
     batch_size: int,
     *,
+    logger: Logger,
     batches: int | None = None,
     device=None
 ) -> None:
@@ -310,6 +311,8 @@ def supernet_warm_up(
             The number of training epochs.
         batch_size (int):
             The number of samples per batch.
+        logger (Logger):
+            The interface to pass logging information to.
         batches (int, None):
             The number of batches per epoch. If set to `None` use the whole data
             set.
@@ -320,7 +323,7 @@ def supernet_warm_up(
 
     ctx.pre(supernet, device=device)
 
-    print(make_caption("Warm Up", 70, " "))
+    logger.log(make_caption("Warm Up", 70, " "))
     for i, max_model in enumerate(space.max_models()):
         net = build_model(
             max_model, supernet.classifier[-1].weight.shape[0]
@@ -328,21 +331,21 @@ def supernet_warm_up(
 
         skeletonnet_train(
             net, ds, epochs, batch_size, 0.9, 5e-5,
-            batches=batches, device=device
+            logger=logger, batches=batches, device=device
         )
 
-        print(make_caption(f"Set Parameters({i + 1})", 70, "-"))
+        logger.log(make_caption(f"Set Parameters({i + 1})", 70, "-"))
 
         set_start = time.time()
         ctx.set(supernet, max_model, net)
         set_time = time.time() - set_start
 
-        print(f"time={set_time:.2f}s\n")
+        logger.log(f"time={set_time:.2f}s\n")
 
     ctx.post(supernet)
 
     warm_up_time = time.time() - warm_up_start
-    print(f"\ntotal={warm_up_time:.2f}s\n")
+    logger.log(f"\ntotal={warm_up_time:.2f}s\n")
 
 
 class TrainCtx(ABC):
@@ -371,6 +374,7 @@ def supernet_train(
     batch_size: int,
     models_per_batch: int,
     *,
+    logger: Logger,
     ctx: TrainCtx | None = None,
     batches: int | None = None,
     device=None
@@ -395,6 +399,8 @@ def supernet_train(
             The number of samples per batch.
         models_per_batch (int):
             The number of models sampled per batch.
+        logger (Logger):
+            The interface to pass logging information to.
         ctx (TrainCtx, None):
             The train context.
         batches (int, None):
@@ -417,16 +423,19 @@ def supernet_train(
         optimizer, 256
     )
 
-    print(make_caption("Training", 70, " "))
+    logger.log(make_caption("Training", 70, " "))
     supernet.train()
     for i in range(epochs):
-        print(make_caption(f"Epoch {i + 1}/{epochs}", 70, "-"))
+        logger.log(make_caption(f"Epoch {i + 1}/{epochs}", 70, "-"))
 
         epoch_start = time.time()
 
         for k, (images, labels) in enumerate(dl):
             lr = scheduler.get_last_lr()[0]
-            print(f"epoch={i + 1}, batch={k + 1:0{len(str(batches))}}/{batches}, lr={lr:.05f}", end="")
+            logger.log(
+                f"epoch={i + 1}, batch={k + 1:0{len(str(batches))}}/{batches}, lr={lr:.05f}",
+                end=""
+            )
 
             batch_start = time.time()
 
@@ -449,7 +458,7 @@ def supernet_train(
 
             batch_time = time.time() - batch_start
 
-            print(f", time={batch_time:.2f}s")
+            logger.log(f", time={batch_time:.2f}s")
 
             if batches == k + 1:
                 break
@@ -459,10 +468,10 @@ def supernet_train(
             ctx.epoch(i + 1, supernet, epochs)
 
         epoch_time = time.time() - epoch_start
-        print(f"\ntime={epoch_time:.2f}s\n")
+        logger.log(f"\ntime={epoch_time:.2f}s\n")
 
     train_time = time.time() - train_start
-    print(f"\ntotal={train_time:.2f}s\n")
+    logger.log(f"\ntotal={train_time:.2f}s\n")
 
 
 def initial_population(

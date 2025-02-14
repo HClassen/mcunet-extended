@@ -6,7 +6,7 @@ from collections.abc import Callable
 import torch
 
 from mcunet.tinynas import SampleManager
-from mcunet.tinynas.searchspace import configurations, Model
+from mcunet.tinynas.searchspace import configurations, Model, SearchSpace
 from mcunet.tinynas.searchspace.model import build_model
 from mcunet.tinynas.configurations.mnasnetplus import MnasNetPlus
 
@@ -20,7 +20,7 @@ def _measure_wrapper(
         model: Model, width_mult: float, resolution: int
     ) -> tuple[int, int, int]:
         net = build_model(model, classes)
-        flops = net.flops(resolution, device=torch.device("cuda:0"))
+        flops = net.flops(resolution, device=torch.device("cpu"))
 
         flash, sram = runner.memory_footprint(model, classes, resolution)
 
@@ -38,16 +38,19 @@ def _func(
     runner = ShimSubprocessManager(2)
     measure = _measure_wrapper(classes, runner)
 
+    seen: set[SearchSpace] = set()
+
     for space, results in manager.apply(measure):
         name = space.__class__.__name__.lower()
         width_mult = str(space.width_mult)[:3].replace(".", "_")
 
         csv = f"{name}-{width_mult}-{space.resolution}-{classes}.csv"
-        with open(path / csv, "w") as f:
-            f.write("flops,flash,sram\n")
+        with open(path / csv, "a") as f:
+            if space not in seen:
+                f.write("flops,flash,sram\n")
+                seen.add(space)
 
-            for result in results:
-                f.write(f"{result[0]},{result[1]},{result[2]}\n")
+            f.write(f"{results[0]},{results[1]},{results[2]}\n")
 
     runner.stop()
 

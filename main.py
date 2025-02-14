@@ -6,7 +6,7 @@ from collections.abc import Callable
 import torch
 
 from mcunet.tinynas import SampleManager
-from mcunet.tinynas.searchspace import configurations, Model
+from mcunet.tinynas.searchspace import configurations, Model, SearchSpace
 from mcunet.tinynas.searchspace.model import build_model
 from mcunet.tinynas.configurations.mnasnetplus import MnasNetPlus
 
@@ -14,40 +14,74 @@ from mcunet.shim.runner import ShimSubprocessManager
 
 
 def _measure_wrapper(
-    classes: int, runner: ShimSubprocessManager
-) -> Callable[[Model, float, int], tuple[int, int, int]]:
+    samples: int,
+    classes: int,
+    runner: ShimSubprocessManager,
+    meta: dict[MnasNetPlus, tuple[Path, int]]
+) -> Callable[[SearchSpace, Model], tuple[int, int, int]]:
     def measure(
-        model: Model, width_mult: float, resolution: int
+        space: SearchSpace, model: Model
     ) -> tuple[int, int, int]:
-        net = build_model(model, classes)
-        flops = net.flops(resolution, device=torch.device("cuda:0"))
+        t = meta[space]
+        if t[1] >= samples + 1:
+            return -1, -1, -1
 
-        flash, sram = runner.memory_footprint(model, classes, resolution)
+        net = build_model(model, classes)
+        flops = net.flops(space.resolution, device=torch.device("cpu"))
+
+        flash, sram = runner.memory_footprint(model, classes, space.resolution)
 
         return flops, flash, sram
 
     return measure
 
 
+def _space_to_csv(space: MnasNetPlus, classes: int) -> str:
+    name = space.__class__.__name__.lower()
+    width_mult = str(space.width_mult)[:3].replace(".", "_")
+
+    return f"{name}-{width_mult}-{space.resolution}-{classes}.csv"
+
+
+def _count_lines(path: Path) -> int:
+    if not path.is_file():
+        return 0
+
+    with open(path, "r") as f:
+        count = len(f.readlines())
+
+    return count
+
+
 def _func(
     samples: int, spaces: list[MnasNetPlus], classes: int, path: Path
 ) -> None:
+    meta: dict[SearchSpace, list[Path, int]] = {}
+    for space in spaces:
+        csv = _space_to_csv(space, classes)
+        path_csv = path / csv
+        lines = _count_lines(path_csv)
+
+        meta[space] = [path_csv, lines]
+
     manager = SampleManager(spaces)
     manager.sample(samples)
 
     runner = ShimSubprocessManager(2)
-    measure = _measure_wrapper(classes, runner)
+    measure = _measure_wrapper(samples, classes, runner, meta)
 
     for space, results in manager.apply(measure):
-        name = space.__class__.__name__.lower()
-        width_mult = str(space.width_mult)[:3].replace(".", "_")
+        t = meta[space]
+        if t[1] >= samples + 1:
+            continue
 
-        csv = f"{name}-{width_mult}-{space.resolution}-{classes}.csv"
-        with open(path / csv, "w") as f:
-            f.write("flops,flash,sram\n")
+        with open(t[0], "a") as f:
+            if t[1] == 0:
+                f.write("flops,flash,sram\n")
+                t[1] = 1
 
-            for result in results:
-                f.write(f"{result[0]},{result[1]},{result[2]}\n")
+            f.write(f"{results[0]},{results[1]},{results[2]}\n")
+            t[1] += 1
 
     runner.stop()
 

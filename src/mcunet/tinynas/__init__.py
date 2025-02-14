@@ -56,15 +56,15 @@ class SampleManager():
 
     def apply(
         self,
-        fn: Callable[[Model, float, int], tuple[Any, ...]],
+        fn: Callable[[SearchSpace, Model], tuple[Any, ...]],
         m: int | None = None
-    ) -> Iterator[tuple[SearchSpace, tuple[Any, ...]]]:
+    ) -> Iterator[SearchSpace, tuple[Any, ...]]:
         """
         Apply the function `fn` to previously sampled models of the different
         search spaces.
 
         Args:
-            fn (Callable[[Model, float, int], tuple[Any, ...]]):
+            fn (Callable[[SearchSpace, Model], tuple[Any, ...]]):
                 This function is applied to all models sampled.
             m (int, None):
                 The number of samples per search space to iterate over. If `None`
@@ -85,13 +85,8 @@ class SampleManager():
         for space in self._spaces:
             end = min(m, self._sample_size) if m is not None else self._sample_size
 
-            yield (
-                space,
-                (
-                    fn(model, space.width_mult, space.resolution)
-                    for model in islice(space, end)
-                )
-            )
+            for model in islice(space, end):
+                yield space, fn(space, model)
 
     def to_dict(self) -> dict[str, Any]:
         """

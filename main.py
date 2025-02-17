@@ -8,7 +8,7 @@ from collections.abc import Callable
 
 import torch
 
-from mcunet.tinynas import SearchManager
+from mcunet.tinynas import SearchManager, SaveEvolutionCtx
 from mcunet.tinynas.oneshot import SuperNet, OneShotNet
 from mcunet.tinynas.searchspace import Model
 from mcunet.tinynas.datasets import transform_resize, gtsrb
@@ -52,7 +52,7 @@ def _parse_memory(memory: str) -> int:
 def _save_manager(path: Path, manager: SearchManager) -> None:
     if path.exists():
         rmtree(path)
-    path.mkdir()
+    path.mkdir(parents=True)
 
     state = manager.to_dict()
     weights = state["weights"]
@@ -64,17 +64,13 @@ def _save_manager(path: Path, manager: SearchManager) -> None:
     with open(path / "weights.pth", "wb") as f:
         torch.save(weights, f)
 
-def _save_top(path: Path, k: int, topk: tuple[tuple[OneShotNet, float]]) -> None:
+def _save_top(path: Path, k: int, topk: list[tuple[Model, float]]) -> None:
     for i, (candidate, accuracy) in enumerate(topk):
         directory = path / f"top-{i}"
-        directory.mkdir(exist_ok=True)
+        directory.mkdir(parents=True, exist_ok=True)
 
-        model = candidate.to_model()
         with open (directory / "meta.json", "w") as f:
-            json.dump({"model": model.to_dict(), "accuracy": accuracy}, f)
-
-        with open(directory / "weights.pth", "wb") as f:
-            torch.save(candidate.state_dict(), f)
+            json.dump({"model": candidate.to_dict(), "accuracy": accuracy}, f)
 
         if i >= k:
             break
@@ -137,7 +133,7 @@ def main() -> None:
 
     path_results = Path(args.results)
     if not path_results.exists():
-        path_results.mkdir()
+        path_results.mkdir(parents=True)
 
     path_ds = Path(args.dataset)
     if not path_ds.exists():
@@ -183,7 +179,10 @@ def main() -> None:
     max_sram = _parse_memory(args.sram)
     fitness = _fitness_wrapper(ds.classes, args.resolution, max_flash, max_sram)
     top = manager.evolution(
-        mutator=mutator, fitness=fitness, device=torch.device("cuda:0")
+        mutator=mutator,
+        fitness=fitness,
+        ctx=SaveEvolutionCtx(path_results / "intermediate", 2, first=True),
+        device=torch.device("cuda:0")
     )
 
     _save_top(path_results / "evolution", 5, top)

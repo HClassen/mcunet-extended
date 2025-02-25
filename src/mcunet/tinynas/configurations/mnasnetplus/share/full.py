@@ -1,5 +1,7 @@
 from typing import cast
+from collections.abc import Callable
 
+import torch
 import torch.nn as nn
 
 from torchvision.ops import SqueezeExcitation
@@ -9,6 +11,7 @@ from ....searchspace import (
     EXPANSION_CHOICES,
     SE_CHOICES,
     LAYER_CHOICES,
+    ConvOp,
     Model
 )
 from ....searchspace.layers import (
@@ -26,14 +29,21 @@ from ....oneshot.share import (
     SharedWeightsSqueezeExcitation,
     ParameterSharer
 )
-from ....oneshot.helper import has_norm
+from ....oneshot.helper import (
+    l1_reorder_conv2d,
+    l1_reorder_batchnorm2d,
+    l1_reorder_se,
+    l1_reorder_main,
+    has_norm
+)
 from ....mobilenet import MobileSkeletonNet
 
 from .. import SuperChoiceBlock, CommonWarmUpCtx
 
 
 __all__ = [
-    "Conv2dSharer", "DWConv2dSharer", "BDWRConv2dSharer", "FullWarmUpCtx"
+    "Conv2dSharer", "DWConv2dSharer", "BDWRConv2dSharer",
+    "WarmUpCtxLocalReorder", "WarmUpCtxGlobalReorder"
 ]
 
 
@@ -45,7 +55,6 @@ class SimpleSharer(ParameterSharer):
 
     def set_shared(self, module: BaseModule) -> None:
         self.conv2d.share(module[LayerName.CONV2D][0])
-        # share_conv2d(module[LayerName.CONV2D][0], self.conv2d_weight, None)
 
         if has_norm(module[LayerName.CONV2D]):
             self.batchnorm2d.share(module[LayerName.CONV2D][1])
@@ -77,16 +86,6 @@ class SimpleSharer(ParameterSharer):
         self.batchnorm2d._weight_initialization()
         self.se._weight_initialization()
 
-    def _weight_copy(self, module: BaseModule) -> None:
-        self.conv2d._weight_copy(module[LayerName.CONV2D][0])
-        if has_norm(module[LayerName.CONV2D]):
-            self.batchnorm2d._weight_copy(
-                module[LayerName.CONV2D][1], self.conv2d._reorder
-            )
-
-        if LayerName.SE in module:
-            self.se._weight_copy(module[LayerName.SE])
-
 
 class Conv2dSharer(SimpleSharer):
     def _make_shared(self, max_in_channels: int, max_out_channels: int) -> None:
@@ -115,11 +114,16 @@ class Conv2dSharer(SimpleSharer):
 
         super().unset_shared(module)
 
-    def _weight_copy(self, module: BaseModule) -> None:
+    def _weight_copy(self, module: nn.Module) -> None:
         if not isinstance(module, Conv2dModule):
             raise TypeError(f"wrong module type {type(module)}")
 
-        super()._weight_copy(module)
+        self.conv2d._weight_copy(module[LayerName.CONV2D][0])
+        if has_norm(module[LayerName.CONV2D]):
+            self.batchnorm2d._weight_copy(module[LayerName.CONV2D][1])
+
+        if LayerName.SE in module:
+            self.se._weight_copy(module[LayerName.SE])
 
 
 class DWConv2dSharer(SimpleSharer):
@@ -175,17 +179,20 @@ class DWConv2dSharer(SimpleSharer):
         self.pw_conv2d._weight_initialization()
         self.pw_batchnorm2d._weight_initialization()
 
-    def _weight_copy(self, module: BaseModule) -> None:
+    def _weight_copy(self, module: nn.Module) -> None:
         if not isinstance(module, DWConv2dModule):
             raise TypeError(f"wrong module type {type(module)}")
 
-        super()._weight_copy(module)
+        self.conv2d._weight_copy(module[LayerName.CONV2D][0])
+        if has_norm(module[LayerName.CONV2D]):
+            self.batchnorm2d._weight_copy(module[LayerName.CONV2D][1])
+
+        if LayerName.SE in module:
+            self.se._weight_copy(module[LayerName.SE])
 
         self.pw_conv2d._weight_copy(module[LayerName.PWCONV2D][0])
         if has_norm(module[LayerName.PWCONV2D]):
-            self.pw_batchnorm2d._weight_copy(
-                module[LayerName.PWCONV2D][1], self.pw_conv2d._reorder
-            )
+            self.pw_batchnorm2d._weight_copy(module[LayerName.PWCONV2D][1])
 
 
 class BDWRConv2dSharer(SimpleSharer):
@@ -272,22 +279,86 @@ class BDWRConv2dSharer(SimpleSharer):
         if not isinstance(module, BDWRConv2dModule):
             raise TypeError(f"wrong module type {type(module)}")
 
-        super()._weight_copy(module)
-
         self.exp_conv2d._weight_copy(module[LayerName.EXPANSION][0])
         if has_norm(module[LayerName.EXPANSION]):
-            self.exp_batchnorm2d._weight_copy(
-                module[LayerName.EXPANSION][1], self.exp_conv2d._reorder
-            )
+            self.exp_batchnorm2d._weight_copy(module[LayerName.EXPANSION][1])
+
+        self.conv2d._weight_copy(module[LayerName.CONV2D][0])
+        if has_norm(module[LayerName.CONV2D]):
+            self.batchnorm2d._weight_copy(module[LayerName.CONV2D][1])
+
+        if LayerName.SE in module:
+            self.se._weight_copy(module[LayerName.SE])
 
         self.pw_conv2d._weight_copy(module[LayerName.PWCONV2D][0])
         if has_norm(module[LayerName.PWCONV2D]):
-            self.pw_batchnorm2d._weight_copy(
-                module[LayerName.PWCONV2D][1], self.pw_conv2d._reorder
-            )
+            self.pw_batchnorm2d._weight_copy(module[LayerName.PWCONV2D][1])
 
 
-class FullWarmUpCtx(CommonWarmUpCtx):
+def _local_reorder_conv2d(
+    src: BaseModule, prev_indices: torch.Tensor | None
+) -> torch.Tensor | None:
+    indices = l1_reorder_main(src[LayerName.CONV2D][0], prev_indices)
+    if has_norm(src[LayerName.CONV2D]):
+        l1_reorder_batchnorm2d(src[LayerName.CONV2D][1], indices)
+
+    if LayerName.SE in src:
+        l1_reorder_se(src[LayerName.SE], indices)
+
+    return indices
+
+
+def _local_reorder_dwconv2d(
+    src: BaseModule, prev_indices: torch.Tensor | None
+) -> torch.Tensor | None:
+    l1_reorder_conv2d(src[LayerName.CONV2D][0], 0, prev_indices)
+    if has_norm(src[LayerName.CONV2D]):
+        l1_reorder_batchnorm2d(src[LayerName.CONV2D][1], prev_indices)
+
+    if LayerName.SE in src:
+        l1_reorder_se(src[LayerName.SE], prev_indices)
+
+    indices = l1_reorder_main(src[LayerName.PWCONV2D][0], prev_indices)
+    if has_norm(src[LayerName.PWCONV2D]):
+        l1_reorder_batchnorm2d(src[LayerName.PWCONV2D][1], indices)
+
+    return indices
+
+
+def _local_reorder_bdwrconv2d(
+    src: BaseModule, prev_indices: torch.Tensor | None
+) -> torch.Tensor | None:
+    indices = l1_reorder_main(src[LayerName.EXPANSION][0], prev_indices)
+    if has_norm(src[LayerName.EXPANSION]):
+        l1_reorder_batchnorm2d(src[LayerName.EXPANSION][1], indices)
+
+    l1_reorder_conv2d(src[LayerName.CONV2D][0], 0, indices)
+    if has_norm(src[LayerName.CONV2D]):
+        l1_reorder_batchnorm2d(src[LayerName.CONV2D][1], indices)
+
+    if LayerName.SE in src:
+        l1_reorder_se(src[LayerName.SE], indices)
+
+    indices = l1_reorder_main(src[LayerName.PWCONV2D][0], indices)
+    if has_norm(src[LayerName.PWCONV2D]):
+        l1_reorder_batchnorm2d(src[LayerName.PWCONV2D][1], indices)
+
+    return indices
+
+
+class WarmUpCtxLocalReorder(CommonWarmUpCtx):
+    _reorder: dict[
+        ConvOp,
+        Callable[[BaseModule, torch.Tensor | None], torch.Tensor | None]
+    ]
+
+    def __init__(self) -> None:
+        self._reorder = {
+            ConvOp.CONV2D: _local_reorder_conv2d,
+            ConvOp.DWCONV2D: _local_reorder_dwconv2d,
+            ConvOp.BDWRCONV2D: _local_reorder_bdwrconv2d
+        }
+
     def set(
         self,
         supernet: MobileSkeletonNet,
@@ -296,6 +367,7 @@ class FullWarmUpCtx(CommonWarmUpCtx):
     ) -> None:
         op = max_model.blocks[0].layers[0].op
 
+        indices = None
         for i, block in enumerate(supernet.blocks):
             block = cast(SuperChoiceBlock, block)
 
@@ -306,6 +378,130 @@ class FullWarmUpCtx(CommonWarmUpCtx):
                     BaseModule, max_net.blocks[i * max(LAYER_CHOICES) + j]
                 )
 
+                indices = self._reorder[op](src, indices)
                 layer.sharer._weight_copy(src)
 
+        l1_reorder_conv2d(max_net.last[0], 1, indices)
+        self._after_set(max_net)
+
+
+def _global_reorder_conv2d(
+    src: BaseModule,
+    prev_indices: torch.Tensor | None,
+    next_indices: torch.Tensor | None
+) -> torch.Tensor | None:
+    l1_reorder_conv2d(src[LayerName.CONV2D][0], 1, prev_indices)
+    with torch.no_grad():
+        reordered = torch.index_select(
+            src[LayerName.CONV2D][0].weight, dim=0, index=next_indices
+        )
+
+        src[LayerName.CONV2D][0].weight = nn.Parameter(reordered)
+
+    if has_norm(src[LayerName.CONV2D]):
+        l1_reorder_batchnorm2d(src[LayerName.CONV2D][1], next_indices)
+
+    if LayerName.SE in src:
+        l1_reorder_se(src[LayerName.SE], next_indices)
+
+    return next_indices
+
+
+def _global_reorder_dwconv2d(
+    src: BaseModule,
+    prev_indices: torch.Tensor | None,
+    next_indices: torch.Tensor | None
+) -> torch.Tensor | None:
+    l1_reorder_conv2d(src[LayerName.CONV2D][0], 0, prev_indices)
+    if has_norm(src[LayerName.CONV2D]):
+        l1_reorder_batchnorm2d(src[LayerName.CONV2D][1], prev_indices)
+
+    if LayerName.SE in src:
+        l1_reorder_se(src[LayerName.SE], prev_indices)
+
+    l1_reorder_conv2d(src[LayerName.PWCONV2D][0], 1, prev_indices)
+    with torch.no_grad():
+        reordered = torch.index_select(
+            src[LayerName.PWCONV2D][0].weight, dim=0, index=next_indices
+        )
+
+        src[LayerName.PWCONV2D][0].weight = nn.Parameter(reordered)
+
+    if has_norm(src[LayerName.PWCONV2D]):
+        l1_reorder_batchnorm2d(src[LayerName.PWCONV2D][1], next_indices)
+
+    return next_indices
+
+
+def _global_reorder_bdwrconv2d(
+    src: BaseModule,
+    prev_indices: torch.Tensor | None,
+    next_indices: torch.Tensor | None
+) -> torch.Tensor | None:
+    indices = l1_reorder_main(src[LayerName.EXPANSION][0], prev_indices)
+    if has_norm(src[LayerName.EXPANSION]):
+        l1_reorder_batchnorm2d(src[LayerName.EXPANSION][1], indices)
+
+    l1_reorder_conv2d(src[LayerName.CONV2D][0], 0, indices)
+    if has_norm(src[LayerName.CONV2D]):
+        l1_reorder_batchnorm2d(src[LayerName.CONV2D][1], indices)
+
+    if LayerName.SE in src:
+        l1_reorder_se(src[LayerName.SE], indices)
+
+    l1_reorder_conv2d(src[LayerName.PWCONV2D][0], 1, indices)
+    with torch.no_grad():
+        reordered = torch.index_select(
+            src[LayerName.PWCONV2D][0].weight, dim=0, index=next_indices
+        )
+
+        src[LayerName.PWCONV2D][0].weight = nn.Parameter(reordered)
+
+    if has_norm(src[LayerName.PWCONV2D]):
+        l1_reorder_batchnorm2d(src[LayerName.PWCONV2D][1], next_indices)
+
+    return next_indices
+
+
+class WarmUpCtxGlobalReorder(CommonWarmUpCtx):
+    _reorder: dict[
+        ConvOp,
+        Callable[
+            [BaseModule, torch.Tensor | None, torch.Tensor | None],
+            torch.Tensor | None
+        ]
+    ]
+    _norms: list[torch.Tensor]
+
+    def __init__(self, norms: list[torch.Tensor]) -> None:
+        self._reorder = {
+            ConvOp.CONV2D: _global_reorder_conv2d,
+            ConvOp.DWCONV2D: _global_reorder_dwconv2d,
+            ConvOp.BDWRCONV2D: _global_reorder_bdwrconv2d
+        }
+        self._norms = norms
+
+    def set(
+        self,
+        supernet: MobileSkeletonNet,
+        max_model: Model,
+        max_net: MobileSkeletonNet
+    ) -> None:
+        op = max_model.blocks[0].layers[0].op
+
+        indices = None
+        for i, block in enumerate(supernet.blocks):
+            block = cast(SuperChoiceBlock, block)
+
+            choice = cast(ChoiceBlock, block.choices[op])
+            for j, layer in enumerate(choice.layers):
+                layer = cast(ChoiceLayer, layer)
+
+                idx = i * max(LAYER_CHOICES) + j
+                src = cast(BaseModule, max_net.blocks[idx])
+
+                indices = self._reorder[op](src, indices, self._norms[idx])
+                layer.sharer._weight_copy(src)
+
+        l1_reorder_conv2d(max_net.last[0], 1, indices)
         self._after_set(max_net)

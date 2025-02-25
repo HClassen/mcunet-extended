@@ -96,7 +96,7 @@ class LastLayerSharer(ParameterSharer):
     def _weight_copy(self, module: Conv2dNormActivation):
         self.conv2d._weight_copy(module[0])
         if has_norm(module):
-            self.batchnorm2d._weight_copy(module[1], self.conv2d._reorder)
+            self.batchnorm2d._weight_copy(module[1])
 
 
 def _permutations() -> Iterator[tuple[int, float, bool]]:
@@ -292,31 +292,31 @@ class CommonWarmUpCtx(WarmUpCtx):
         self._first_batchnorm2d.to(device)
 
         with torch.no_grad():
-            self._first_conv2d._weight.zero_()
-            self._first_batchnorm2d._weight.zero_()
-            self._first_batchnorm2d._bias.zero_()
-            self._first_batchnorm2d._running_mean.zero_()
-            self._first_batchnorm2d._running_var.zero_()
-            self._first_batchnorm2d._num_batches_tracked.zero_()
+            self._first_conv2d.weight.zero_()
+            self._first_batchnorm2d.weight.zero_()
+            self._first_batchnorm2d.bias.zero_()
+            self._first_batchnorm2d.running_mean.zero_()
+            self._first_batchnorm2d.running_var.zero_()
+            self._first_batchnorm2d.num_batches_tracked.zero_()
 
         last = cast(LastChoiceLayer, supernet.last)
         sharer = cast(LastLayerSharer, last.sharer)
         self._last_conv2d = SharedWeightsConv2d(
-            sharer.conv2d._weight.size(), False
+            sharer.conv2d.weight.size(), False
         )
         self._last_batchnorm2d = SharedWeightsBatchNorm2d(
-            sharer.batchnorm2d._weight.size(), True
+            sharer.batchnorm2d.weight.size(), True
         )
         self._last_conv2d.to(device)
         self._last_batchnorm2d.to(device)
 
         with torch.no_grad():
-            self._last_conv2d._weight.zero_()
-            self._last_batchnorm2d._weight.zero_()
-            self._last_batchnorm2d._bias.zero_()
-            self._last_batchnorm2d._running_mean.zero_()
-            self._last_batchnorm2d._running_var.zero_()
-            self._last_batchnorm2d._num_batches_tracked.zero_()
+            self._last_conv2d.weight.zero_()
+            self._last_batchnorm2d.weight.zero_()
+            self._last_batchnorm2d.bias.zero_()
+            self._last_batchnorm2d.running_mean.zero_()
+            self._last_batchnorm2d.running_var.zero_()
+            self._last_batchnorm2d.num_batches_tracked.zero_()
 
         classifier = supernet.classifier
         self._classifier_parameters = (
@@ -327,23 +327,23 @@ class CommonWarmUpCtx(WarmUpCtx):
     def _after_set(self, max_net: MobileSkeletonNet) -> None:
         first = max_net.first
         with torch.no_grad():
-            self._first_conv2d._weight.add_(first[0].weight)
-            self._first_batchnorm2d._weight.add_(first[1].weight)
-            self._first_batchnorm2d._bias.add_(first[1].bias)
-            self._first_batchnorm2d._running_mean.add_(first[1].running_mean)
-            self._first_batchnorm2d._running_var.add_(first[1].running_var)
-            self._first_batchnorm2d._num_batches_tracked.add_(
+            self._first_conv2d.weight.add_(first[0].weight)
+            self._first_batchnorm2d.weight.add_(first[1].weight)
+            self._first_batchnorm2d.bias.add_(first[1].bias)
+            self._first_batchnorm2d.running_mean.add_(first[1].running_mean)
+            self._first_batchnorm2d.running_var.add_(first[1].running_var)
+            self._first_batchnorm2d.num_batches_tracked.add_(
                 first[1].num_batches_tracked
             )
 
         last = max_net.last
         with torch.no_grad():
-            self._last_conv2d._weight.add_(last[0].weight)
-            self._last_batchnorm2d._weight.add_(last[1].weight)
-            self._last_batchnorm2d._bias.add_(last[1].bias)
-            self._last_batchnorm2d._running_mean.add_(last[1].running_mean)
-            self._last_batchnorm2d._running_var.add_(last[1].running_var)
-            self._last_batchnorm2d._num_batches_tracked.add_(
+            self._last_conv2d.weight.add_(last[0].weight)
+            self._last_batchnorm2d.weight.add_(last[1].weight)
+            self._last_batchnorm2d.bias.add_(last[1].bias)
+            self._last_batchnorm2d.running_mean.add_(last[1].running_mean)
+            self._last_batchnorm2d.running_var.add_(last[1].running_var)
+            self._last_batchnorm2d.num_batches_tracked.add_(
                 last[1].num_batches_tracked
             )
 
@@ -353,42 +353,42 @@ class CommonWarmUpCtx(WarmUpCtx):
 
     def post(self, supernet: MobileSkeletonNet) -> None:
         with torch.no_grad():
-            self._first_conv2d._weight.div_(3)
-            self._first_batchnorm2d._weight.div_(3)
-            self._first_batchnorm2d._bias.div_(3)
-            self._first_batchnorm2d._running_mean.div_(3)
-            self._first_batchnorm2d._running_var.div_(3)
+            self._first_conv2d.weight.div_(3)
+            self._first_batchnorm2d.weight.div_(3)
+            self._first_batchnorm2d.bias.div_(3)
+            self._first_batchnorm2d.running_mean.div_(3)
+            self._first_batchnorm2d.running_var.div_(3)
 
-            self._last_conv2d._weight.div_(3)
-            self._last_batchnorm2d._weight.div_(3)
-            self._last_batchnorm2d._bias.div_(3)
-            self._last_batchnorm2d._running_mean.div_(3)
-            self._last_batchnorm2d._running_var.div_(3)
+            self._last_conv2d.weight.div_(3)
+            self._last_batchnorm2d.weight.div_(3)
+            self._last_batchnorm2d.bias.div_(3)
+            self._last_batchnorm2d.running_mean.div_(3)
+            self._last_batchnorm2d.running_var.div_(3)
 
             for shared in self._classifier_parameters:
                 shared.div_(3)
 
             first = supernet.first
-            first[0].weight.copy_(self._first_conv2d._weight)
-            first[1].weight.copy_(self._first_batchnorm2d._weight)
-            first[1].bias.copy_(self._first_batchnorm2d._bias)
-            first[1].running_mean.copy_(self._first_batchnorm2d._running_mean)
-            first[1].running_var.copy_(self._first_batchnorm2d._running_var)
+            first[0].weight.copy_(self._first_conv2d.weight)
+            first[1].weight.copy_(self._first_batchnorm2d.weight)
+            first[1].bias.copy_(self._first_batchnorm2d.bias)
+            first[1].running_mean.copy_(self._first_batchnorm2d.running_mean)
+            first[1].running_var.copy_(self._first_batchnorm2d.running_var)
             first[1].num_batches_tracked.copy_(
-                self._first_batchnorm2d._num_batches_tracked
+                self._first_batchnorm2d.num_batches_tracked
             )
 
             out_channels, in_channels, height, width = \
-                self._last_conv2d._weight.size()
+                self._last_conv2d.weight.size()
             tmp = Conv2dNormActivation(
                 in_channels, out_channels, (height, width)
             )
-            tmp[0].weight = self._last_conv2d._weight
-            tmp[1].weight = self._last_batchnorm2d._weight
-            tmp[1].bias = self._last_batchnorm2d._bias
-            tmp[1].running_mean = self._last_batchnorm2d._running_mean
-            tmp[1].running_var = self._last_batchnorm2d._running_var
-            tmp[1].num_batches_tracked = self._last_batchnorm2d._num_batches_tracked
+            tmp[0].weight = self._last_conv2d.weight
+            tmp[1].weight = self._last_batchnorm2d.weight
+            tmp[1].bias = self._last_batchnorm2d.bias
+            tmp[1].running_mean = self._last_batchnorm2d.running_mean
+            tmp[1].running_var = self._last_batchnorm2d.running_var
+            tmp[1].num_batches_tracked = self._last_batchnorm2d.num_batches_tracked
 
             last = cast(LastChoiceLayer, supernet.last)
             sharer = cast(LastLayerSharer, last.sharer)

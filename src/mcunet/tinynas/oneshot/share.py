@@ -150,7 +150,7 @@ def share_conv2d(
         weight[:out_channels, :in_channels, h_start:h_end, w_start:w_end]
     )
 
-    if conv2d.bias is None or bias is None:
+    if bias is None:
         return
 
     conv2d.bias = nn.Parameter(bias[:out_channels])
@@ -177,7 +177,7 @@ def share_batchnorm2d(
 
     Args:
         batchnorm2d (torch.nn.BatchNorm2d):
-            The batchnorm2de.
+            The batchnorm2d.
         weight (nn.Parameter):
             The shared weight.
         bias (torch.nn.Parameter):
@@ -257,7 +257,7 @@ def set_conv2d(
     weight: nn.Parameter,
     bias: nn.Parameter | None,
     conv2d: nn.Conv2d
-) -> list[int]:
+) -> None:
     """
     Set the two shared parameters of a conv2d to the weights in
     `conv2d`.
@@ -266,28 +266,17 @@ def set_conv2d(
         weight (torch.nn.Parameter):
             The shared weight of the conv2d.
         bias (torch.nn.Parameter, None):
-            The shared bias of the conv2d.
+            The optional shared bias of the conv2d.
         conv2d (torch.nn.Conv2d):
-            The layers to copy the weights from.
-
-    Returns:
-        list[int]:
-            The reordered channels.
+            The conv2d to copy the weights from.
     """
-    src_weight = conv2d.weight
-    reordered, importance = l1_sort(src_weight)
-
     with torch.no_grad():
-        weight.copy_(reordered)
+        weight.copy_(conv2d.weight)
 
         if conv2d.bias is None or bias is None:
             return
 
-        src_bias = conv2d.bias
-        for k, channel in enumerate(importance):
-            bias[k] = src_bias[channel]
-
-    return importance
+        bias.copy_(conv2d.bias)
 
 
 def set_batchnorm2d(
@@ -296,41 +285,37 @@ def set_batchnorm2d(
     running_mean: torch.Tensor | None,
     running_var: torch.Tensor | None,
     num_batches_tracked: torch.Tensor | None,
-    batchnorm2d: nn.BatchNorm2d,
-    reorder: list[int] | None
+    batchnorm2d: nn.BatchNorm2d
 ) -> None:
     """
-    Set the three shared parameters of a conv2d followed by a
-    batch-normalisation to the weights in `sequential`.
+    Set the five shared parameters of a batchnorm2d to the weights in
+    `batchnorm2d`.
 
     Args:
         weight (torch.nn.Parameter):
-            The shared weight of the conv2d.
-        norm_weight (torch.nn.Parameter):
-            The shared weight of the batch-normalisation.
-        norm_bias (torch.nn.Parameter):
-            The shared bias of the batch-normalisation.
-        sequential (torch.nn.Sequential):
-            The layers to copy the weights from.
+            The shared weight of the batchnorm2d.
+        bias (torch.nn.Parameter):
+            The shared weight of the batchnorm2d.
+        running_mean (torch.Tensor, None):
+            The optional shared running mean of the batchnorm2d.
+        running_var (torch.Tensor, None):
+            The optional shared running variance of the batchnorm2d.
+        num_batches_tracked (torch.Tensor, None):
+            The optional shared number of tracked batches of the batchnorm2d.
+        batchnorm2d (torch.nn.BatchNorm2d):
+            The batchnorm2d to copy the weights from.
     """
-    reorder = reorder if reorder is not None \
-              else [i for i in range(weight.size()[0])]
-
     with torch.no_grad():
-        src_weight = batchnorm2d.weight
-        src_bias = batchnorm2d.bias
+        weight.copy_(batchnorm2d.weight)
+        bias.copy_(batchnorm2d.bias)
 
         src_running_mean = batchnorm2d.running_mean
+        if running_mean is not None and src_running_mean is not None:
+            running_mean.copy_(src_running_mean)
+
         src_running_var = batchnorm2d.running_var
-        for k, channel in enumerate(reorder):
-            weight[k] = src_weight[channel]
-            bias[k] = src_bias[channel]
-
-            if running_mean is not None and src_running_mean is not None:
-                running_mean[k] = src_running_mean[channel]
-
-            if running_var is not None and src_running_var is not None:
-                running_var[k] = src_running_var[channel]
+        if running_var is not None and src_running_var is not None:
+            running_var.copy_(src_running_var)
 
         src_num_batches_tracked = batchnorm2d.num_batches_tracked
         if num_batches_tracked is not None \
@@ -339,36 +324,33 @@ def set_batchnorm2d(
 
 
 class SharedWeightsConv2d(nn.Module):
-    _weight: nn.Parameter
-    _bias: nn.Parameter | None
-
-    _reorder: list[int] | None
+    weight: nn.Parameter
+    bias: nn.Parameter | None
 
     def __init__(
         self, shape: torch.Size | tuple[int, int, int, int], bias: bool
     ) -> None:
         super().__init__()
 
-        self._weight, self._bias = make_shared_conv2d(shape, bias)
-        self._reorder = None
+        self.weight, self.bias = make_shared_conv2d(shape, bias)
 
     def share(self, conv2d: nn.Conv2d) -> None:
-        share_conv2d(conv2d, self._weight, self._bias)
+        share_conv2d(conv2d, self.weight, self.bias)
 
     def _weight_initialization(self) -> None:
-        init_conv2d(self._weight, self._bias)
+        init_conv2d(self.weight, self.bias)
 
     def _weight_copy(self, src: nn.Conv2d) -> None:
-        self._reorder = set_conv2d(self._weight, self._bias, src)
+        set_conv2d(self.weight, self.bias, src)
 
 
 class SharedWeightsBatchNorm2d(nn.Module):
-    _weight: nn.Parameter
-    _bias: nn.Parameter
+    weight: nn.Parameter
+    bias: nn.Parameter
 
-    _running_mean: torch.Tensor | None
-    _running_var: torch.Tensor | None
-    _num_batches_tracked: torch.Tensor | None
+    running_mean: torch.Tensor | None
+    running_var: torch.Tensor | None
+    num_batches_tracked: torch.Tensor | None
 
     def __init__(
         self, shape: torch.Size | int, track_running_stats: bool
@@ -377,67 +359,64 @@ class SharedWeightsBatchNorm2d(nn.Module):
 
         shared = make_shared_batchnorm2d(shape, track_running_stats)
 
-        self._weight = shared[0]
-        self._bias = shared[1]
+        self.weight = shared[0]
+        self.bias = shared[1]
 
-        self.register_buffer("_running_mean", shared[2])
-        self.register_buffer("_running_var", shared[3])
-        self.register_buffer("_num_batches_tracked", shared[4])
+        self.register_buffer("running_mean", shared[2])
+        self.register_buffer("running_var", shared[3])
+        self.register_buffer("num_batches_tracked", shared[4])
 
     def share(self, batchnorm2d: nn.BatchNorm2d) -> None:
         share_batchnorm2d(
             batchnorm2d,
-            self._weight,
-            self._bias,
-            self._running_mean,
-            self._running_var,
-            self._num_batches_tracked
+            self.weight,
+            self.bias,
+            self.running_mean,
+            self.running_var,
+            self.num_batches_tracked
         )
 
     def _weight_initialization(self) -> None:
         init_batchnorm2d(
-            self._weight,
-            self._bias,
-            self._running_mean,
-            self._running_var,
-            self._num_batches_tracked
+            self.weight,
+            self.bias,
+            self.running_mean,
+            self.running_var,
+            self.num_batches_tracked
         )
 
-    def _weight_copy(
-        self, src: nn.BatchNorm2d, reorder: list[int] | None
-    ) -> None:
+    def _weight_copy(self, src: nn.BatchNorm2d) -> None:
         set_batchnorm2d(
-            self._weight,
-            self._bias,
-            self._running_mean,
-            self._running_var,
-            self._num_batches_tracked,
-            src,
-            reorder
+            self.weight,
+            self.bias,
+            self.running_mean,
+            self.running_var,
+            self.num_batches_tracked,
+            src
         )
 
 
 class SharedWeightsSqueezeExcitation(nn.Module):
-    _fc1: SharedWeightsConv2d
-    _fc2: SharedWeightsConv2d
+    fc1: SharedWeightsConv2d
+    fc2: SharedWeightsConv2d
 
     def __init__(self, in_channels: int, se_channels: int) -> None:
         super().__init__()
 
-        self._fc1 = SharedWeightsConv2d((se_channels, in_channels, 1, 1), True)
-        self._fc2 = SharedWeightsConv2d((in_channels, se_channels, 1, 1), True)
+        self.fc1 = SharedWeightsConv2d((se_channels, in_channels, 1, 1), True)
+        self.fc2 = SharedWeightsConv2d((in_channels, se_channels, 1, 1), True)
 
     def share(self, se: SqueezeExcitation) -> None:
-        self._fc1.share(se.fc1)
-        self._fc2.share(se.fc2)
+        self.fc1.share(se.fc1)
+        self.fc2.share(se.fc2)
 
     def _weight_initialization(self) -> None:
-        self._fc1._weight_initialization()
-        self._fc2._weight_initialization()
+        self.fc1._weight_initialization()
+        self.fc2._weight_initialization()
 
     def _weight_copy(self, se: SqueezeExcitation) -> None:
-        self._fc1._weight_copy(se.fc1)
-        self._fc2._weight_copy(se.fc2)
+        self.fc1._weight_copy(se.fc1)
+        self.fc2._weight_copy(se.fc2)
 
 
 class ParameterSharer(ABC, nn.Module):
@@ -463,7 +442,7 @@ class ParameterSharer(ABC, nn.Module):
         pass
 
     @abstractmethod
-    def _weight_copy(self, module: nn.Module) -> None:
+    def _weight_copy(self,  module: nn.Module) -> None:
         pass
 
 

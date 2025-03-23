@@ -187,6 +187,22 @@ class Block():
     layers: list[Layer]
 
 
+def _convert(config: dict[str, Any]) -> dict[str, Any]:
+    op = config["op"]
+    if not isinstance(op, ConvOp):
+        config["op"] = ConvOp(op)
+
+    kernel_size = config["kernel_size"]
+    if not isinstance(kernel_size, tuple):
+        config["kernel_size"] = tuple(kernel_size)
+
+    stride = config["stride"]
+    if not isinstance(stride, tuple):
+        config["stride"] = tuple(stride)
+
+    return config
+
+
 @dataclass
 class Model():
     width_mult: float
@@ -217,9 +233,12 @@ class Model():
                 The model constructed from the `dict`.
         """
         blocks: list[Block] = [
-            Block([
-                Layer(**layer_config) for layer_config in block_config["layers"]
-            ]) for block_config in config["blocks"]
+            Block(
+                [
+                    Layer(**_convert(layer_config))
+                    for layer_config in block_config["layers"]
+                ]
+            ) for block_config in config["blocks"]
         ]
 
         return cls(config["width_mult"], blocks, config["last_channels"])

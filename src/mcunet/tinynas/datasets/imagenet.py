@@ -128,6 +128,41 @@ class ImageNetDataset(CustomDataset):
     def classes(self) -> int:
         return self._classes
 
+    def to_dict(self) -> dict[str, Any]:
+        images = [
+            (str(entry[0]), entry[1]) for entry in self._images
+        ]
+
+        return {
+            "classes": self._classes,
+            "images": images,
+            "synset_mapping": self._synset_mapping,
+            "classes_mapping": self._classes_mapping
+        }
+
+    @classmethod
+    def from_dict(
+        cls,
+        config: dict[str, Any],
+        transform: Callable[[torch.Tensor], torch.Tensor] | None = None,
+        target_transform: Callable[[Any], Any] | None = None
+    ) -> 'ImageNetDataset':
+        images = [
+            (Path(entry[0]), entry[1]) for entry in config["images"]
+        ]
+
+        return cast(
+            ImageNetDataset,
+            _Subset(
+                config["classes"],
+                images,
+                config["synset_mapping"],
+                config["classes_mapping"],
+                transform,
+                target_transform
+            )
+        )
+
 
 class _Subset(ImageNetDataset):
     def __init__(
@@ -192,6 +227,7 @@ def subset(
             entry[0] for entry in ds._images if entry[1] == synset
         ]
         length = len(class_images)
+        print(length)
 
         images = length if images is None else min(images, length)
         subimages = torch.randperm(length)[:images]
@@ -259,7 +295,7 @@ def strict_split(
         else:
             if total > len(class_images):
                 raise ValueError(
-                    f"sum of lengths {total} is greater than avaialble images {sum(class_images)}"
+                    f"sum of lengths {total} is greater than available images {len(class_images)}"
                 )
 
             subset_lengths.extend(lengths)

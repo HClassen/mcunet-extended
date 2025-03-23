@@ -276,12 +276,12 @@ def skeletonnet_train(
         logger.log(make_caption(f"Epoch {i + 1}/{epochs}", 70, "-"))
         epoch_start = time.time()
 
+        batch_start = time.time()  # to capture data load time
         for j, (images, labels) in enumerate(dl):
             logger.log(
                 f"epoch={i + 1}, batch={j + 1:0{len(str(batches))}}/{batches}",
                 end=""
             )
-            batch_start = time.time()
 
             images = images.to(device)
             labels = labels.to(device)
@@ -297,6 +297,7 @@ def skeletonnet_train(
             batch_time = time.time() - batch_start
 
             logger.log(f", time={batch_time:.2f}s")
+            batch_start = time.time()
 
             if batches == j + 1:
                 break

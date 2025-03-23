@@ -147,7 +147,7 @@ class EDF():
         return self._events[idxs] / self._sorted.size
 
     def show(
-        self, sample: int | None = None, ax: plt.Axes | None = None
+        self, sample: int | None = None, ax: plt.Axes | None = None, **kwargs
     ) -> None:
         """
         Plots this EDF.
@@ -166,13 +166,13 @@ class EDF():
             start=self._buckets[0],
             stop=self._buckets[-1],
             num=sample,
-            dtype=np.int32
+            dtype=np.int64
         )
 
         if ax is not None:
-            ax.plot(spaced, self._evaluate(spaced))
+            ax.plot(spaced, self._evaluate(spaced), **kwargs)
         else:
-            plt.plot(spaced, self._evaluate(spaced))
+            plt.plot(spaced, self._evaluate(spaced), **kwargs)
 
     def percentile(self, p: float) -> int:
         """
@@ -188,10 +188,8 @@ class EDF():
         """
         steps = self._events / self._sorted.size
 
-        for i in range(steps.size):
-            idx = steps.size - i - 1
-
-            if p <= steps[idx]:
-                return self._buckets[idx]
+        for i, step in enumerate(steps):
+            if p <= step:
+                return self._buckets[i]
 
         return self._buckets[0]

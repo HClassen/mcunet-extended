@@ -61,7 +61,7 @@ type ChoicesConstructor = Annotated[
 
 class ChoiceLayer(nn.Module):
     active: nn.Module | None
-    choices: nn.ModuleList  # An array of `BaseOp` modules
+    choices: nn.ModuleList  # An array of `BaseModule` modules
 
     sharer: ParameterSharer
 

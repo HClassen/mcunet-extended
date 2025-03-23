@@ -430,14 +430,13 @@ def supernet_train(
 
         epoch_start = time.time()
 
+        batch_start = time.time()  # to capture data load time
         for k, (images, labels) in enumerate(dl):
             lr = scheduler.get_last_lr()[0]
             logger.log(
                 f"epoch={i + 1}, batch={k + 1:0{len(str(batches))}}/{batches}, lr={lr:.05f}",
                 end=""
             )
-
-            batch_start = time.time()
 
             images = images.to(device)
             labels = labels.to(device)
@@ -459,6 +458,7 @@ def supernet_train(
             batch_time = time.time() - batch_start
 
             logger.log(f", time={batch_time:.2f}s")
+            batch_start = time.time()
 
             if batches == k + 1:
                 break

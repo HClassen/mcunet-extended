@@ -9,15 +9,16 @@ requires-python = ">= 3.12"
 authors = [{ name = "Henrik Claßen", email = "henrik.classen@web.de" }]
 readme = "README.md"
 dependencies = [
-    "torch",
-    "torchvision",
-    "tensorflow",
-    "silence_tensorflow",
-    "flatbuffers",
-    "matplotlib",
-    "pyqt6",
+    "torch == 2.6.0",
+    "torchvision == 0.21.0",
+    "tensorflow == 2.19.0",
+    "keras == 3.9.0",
+    "silence_tensorflow == 1.2.3",
+    "flatbuffers == 25.2.10",
+    "matplotlib == 3.10.1",
+    "pyqt6 == 6.8.1",
     "numpy == 1.26.4",
-    "pandas"
+    "pandas == 2.2.3"
 ]
 
 [tool.setuptools.packages.find]

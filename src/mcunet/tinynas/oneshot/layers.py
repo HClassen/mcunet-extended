@@ -24,7 +24,7 @@ __all__ = [
 ]
 
 
-type ChoicesConstructor = Annotated[
+ChoicesConstructor = Annotated[
     Callable[
         [
             tuple[int, ...],
@@ -223,7 +223,7 @@ class ChoiceBlock(nn.Module):
         return inputs
 
 
-type ChoiceBlockConstructor = Annotated[
+ChoiceBlockConstructor = Annotated[
     Callable[
         [
             tuple[int, ...],

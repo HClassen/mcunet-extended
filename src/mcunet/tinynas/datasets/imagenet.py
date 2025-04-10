@@ -52,15 +52,18 @@ class ImageNetDataset(CustomDataset):
 
     def _init_synset_mapping(self, root: Path, data: Path) -> None:
         train = data / "train"
-        walk = train.walk(top_down=True, follow_symlinks=False)
-        _, classes, _ = next(walk)
 
+        i = 0
         mapping: dict[str, int] = {}
-        for i, name in enumerate(classes):
-            if name in mapping:
+        for path in train.glob("*"):
+            if not path.is_dir():
+                continue
+
+            if path.name in mapping:
                 raise RuntimeError(f"class '{name}' exists twice")
 
-            mapping[name] = i
+            mapping[path.name] = i
+            i += 1
 
         with open(root / "LOC_synset_mapping.txt", "r") as f:
             lines = f.readlines()
@@ -81,23 +84,18 @@ class ImageNetDataset(CustomDataset):
 
     def _init_train(self, data: Path) -> None:
         data = data / "train"
-        walk = data.walk(top_down=True, follow_symlinks=False)
 
         self._images = [
-            (path / file, path.name)
-            for path, _, files in walk for file in files
+            (path, path.parts[-2]) for path in data.glob("**/*.JPEG")
         ]
 
     def _init_test(self, data: Path, annotations: Path) -> None:
         data = data / "val"
         annotations = annotations / "val"
 
-        walk = annotations.walk(top_down=True, follow_symlinks=False)
-        _, _, files = next(walk)
-
         images: list[tuple[Path, str]] = []
-        for file in files:
-            tree = ET.parse(annotations / file)
+        for path in annotations.glob("**/*.xml"):
+            tree = ET.parse(path)
             root = tree.getroot()
 
             file_name = root.find("filename").text

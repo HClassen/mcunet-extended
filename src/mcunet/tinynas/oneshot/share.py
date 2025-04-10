@@ -488,7 +488,7 @@ class ParameterSharer(ABC, nn.Module):
         pass
 
 
-type ParameterSharerConstructor = Annotated[
+ParameterSharerConstructor = Annotated[
     Callable[[int, int], ParameterSharer],
     Doc(
         """

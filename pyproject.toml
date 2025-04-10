@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "mcunet"
 version = "0.0.1"
-requires-python = ">= 3.12"
+requires-python = ">= 3.11"
 authors = [{ name = "Henrik Claßen", email = "henrik.classen@web.de" }]
 readme = "README.md"
 dependencies = [

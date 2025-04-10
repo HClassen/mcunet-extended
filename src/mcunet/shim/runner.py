@@ -1,3 +1,4 @@
+import os
 import sys
 import json
 import subprocess
@@ -11,7 +12,10 @@ __all__ = ["start_shim_runner", "stop_shim_runner", "memory_footprint"]
 
 def _create_subprocess(path: Path) -> subprocess.Popen:
     return subprocess.Popen(
-        [sys.executable, path], stdin=subprocess.PIPE, stdout=subprocess.PIPE
+        [sys.executable, path],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        env=os.environ
     )
 
 

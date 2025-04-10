@@ -1,8 +1,13 @@
 import sys
 import json
 
-from mcunet.shim import build_model, dummy_train, dummy_to_tflite, clear_keras
 from mcunet.shim.shutup import silence
+silence()
+
+import tensorflow as tf
+tf.config.set_visible_devices([], "GPU")
+
+from mcunet.shim import build_model, dummy_train, dummy_to_tflite, clear_keras
 
 from mcunet.tinynas.searchspace import Model
 
@@ -51,9 +56,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    silence()
-
-    import tensorflow as tf
-    tf.config.set_visible_devices([], "GPU")
-
     main()

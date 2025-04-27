@@ -184,8 +184,8 @@ def build_model(
             data_format="channels_last", keepdims=True
         ),
         keras.layers.Flatten(data_format="channels_last"),
-        keras.layers.Dropout(rate=dropout),
-        keras.layers.Dense(classes)
+        # keras.layers.Dropout(rate=dropout),
+        # keras.layers.Dense(classes)
     ]
 
     net = keras.Sequential(first + blocks + last)

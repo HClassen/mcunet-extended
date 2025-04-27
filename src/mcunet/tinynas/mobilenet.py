@@ -158,7 +158,6 @@ class MobileSkeletonNet(nn.Module):
     blocks: nn.ModuleList
     last: nn.Module
     pool: nn.Sequential  # avg pooling + flatten
-    classifier: nn.Sequential  # dropout + linear
 
     def __init__(
         self,
@@ -166,7 +165,6 @@ class MobileSkeletonNet(nn.Module):
         blocks: Iterable[nn.Module],
         last: nn.Module,
         pool: nn.Sequential,
-        classifier: nn.Sequential,
         initialize_weights: bool = True
     ) -> None:
         super().__init__()
@@ -175,7 +173,6 @@ class MobileSkeletonNet(nn.Module):
         self.blocks = nn.ModuleList(blocks)
         self.last = last
         self.pool = pool
-        self.classifier = classifier
 
         if initialize_weights:
             self._weight_initialization()
@@ -200,9 +197,8 @@ class MobileSkeletonNet(nn.Module):
             inputs = block(inputs)
 
         inputs = self.last(inputs)
-        inputs = self.pool(inputs)
 
-        return self.classifier(inputs)
+        return self.pool(inputs)
 
     @cache
     def flops(self, resolution: int, *, device=None) -> int:

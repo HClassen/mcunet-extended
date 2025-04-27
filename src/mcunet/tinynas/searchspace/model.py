@@ -56,11 +56,10 @@ def build_model(
 
     in_channels = model.blocks[-1].layers[-1].out_channels
     last = build_last(
-        in_channels, model.last_channels,
+        in_channels, classes,
         norm_layer=norm_layer, activation_layer=activation_layer
     )
 
     pool = build_pool()
-    classifier = build_classifier(classes, model.last_channels, dropout)
 
-    return MobileSkeletonNet(first, blocks, last, pool, classifier)
+    return MobileSkeletonNet(first, blocks, last, pool, initialize_weights=False)
